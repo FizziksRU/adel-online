@@ -1,0 +1,25 @@
+{
+  "name": "adel-online",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node server.js",
+    "dev:client": "vite",
+    "build": "vite build",
+    "start": "node server.js",
+    "test": "node test/smoke.js && node test/rules.js && node test/layout.js && node test/endings.js && node test/specials.js && node test/crew.js && node test/playthrough.js && node test/ui.js && node test/playthrough.js"
+  },
+  "dependencies": {
+    "boardgame.io": "^0.50.2",
+    "koa-static": "^5.0.0",
+    "node-persist": "^4.0.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "vite": "^5.4.11"
+  }
+}
