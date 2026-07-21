@@ -8,8 +8,8 @@
 // Стартовая раскладка задаётся явно — иначе исход зависел бы от того, куда
 // случай положил ключевые предметы.
 import { Adel } from '../src/game/index.js';
-import { HAZARDS, CHARACTERS, ADJ, MARKER_SLOTS, ITEMS } from '../src/game/data.js';
-import { botState, planFor, act } from './bot.js';
+import { HAZARDS, CHARACTERS, ADJ, MARKER_SLOTS, ITEMS, HEALTH_DEATH } from '../src/game/data.js';
+import { botState, planFor, act, answerChecks } from './bot.js';
 
 let failed = 0;
 const assert = (cond, msg) => {
@@ -68,6 +68,7 @@ const nameOf = (G, pid) => CHARACTERS[G.players[pid].character].name;
 // Ровно то, что делает живой игрок, прежде чем продолжить ход.
 function settle(G, pid, random) {
   const P = G.players[pid];
+  answerChecks(G, random);
   for (let guard = 0; guard < 12; guard++) {
     if (P.pendingHypoxia) {
       const k = ['door', 'activate', 'special', 'search', 'move']
@@ -101,6 +102,9 @@ function playTurn(G, random, { plans, act, adel }) {
 
   if (adel) adel(G, random);
   mv('adelEndPhase')({ G, playerID: '0', random });
+  // Фаза розыгрыша могла поставить проверки духа за пожары: пока экипаж их не
+  // бросит, фаза действий не начнётся.
+  answerChecks(G, random);
   if (G.winner) return;
   assert(G.phase === 'actions', `после фазы АДЕЛЬ — действия, а не «${G.phase}»`);
 
@@ -111,8 +115,11 @@ function playTurn(G, random, { plans, act, adel }) {
     mv('claimActive')({ G, playerID: pid });
     settle(G, pid, random);
     if (act) act(pid, G, random);
+    answerChecks(G, random);
     settle(G, pid, random);
     if (!G.winner && !P.dead) mv('finishTurn')({ G, playerID: pid, random });
+    // Конец хода открывает новое событие — «Манёвр» и «Паника» тоже бросаются.
+    answerChecks(G, random);
   }
 }
 
@@ -310,19 +317,27 @@ const adelPlaysCards = (safeLocs) => (G, random) => {
     turns += 1;
     playTurn(G, random, {
       plans: () => plan({ move: 4 }),
-      // курсируем между двумя горящими локациями
+      // Курсируем между двумя горящими локациями. Каждый вход упирается в
+      // проверку духа: пока кубик не брошен, второй переход отклоняется.
       act: (pid, g) => {
         if (pid !== a) return;
         const to = g.players[a].pos === 2 ? 3 : 2;
         mv('actMove')({ G: g, playerID: a, random }, to);
-        if (!g.winner) mv('actMove')({ G: g, playerID: a, random }, to === 2 ? 3 : 2);
+        answerChecks(g, random);
+        if (!g.winner) {
+          mv('actMove')({ G: g, playerID: a, random }, to === 2 ? 3 : 2);
+          answerChecks(g, random);
+        }
       },
     });
   }
 
   assert(G.winner === 'adel', `АДЕЛЬ побеждает гибелью экипажа, winner=${G.winner}`);
   assert(G.players[a].dead === true, `${nameOf(G, a)} погибает`);
-  assert(G.players[a].health >= 5, `к гибели набралось ${G.players[a].health} ран`);
+  // Убивает шестая рана: пять персонаж переживает. Проверяем точное число —
+  // «не меньше пяти» прошло бы и при более мягком правиле.
+  assert(G.players[a].health === HEALTH_DEATH,
+    `к гибели набралось ровно ${HEALTH_DEATH} ран, а не ${G.players[a].health}`);
   assert(G.log.some(l => l.includes('погибает')), 'гибель объявлена в журнале');
 }
 

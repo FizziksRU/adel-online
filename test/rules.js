@@ -62,6 +62,18 @@ function readyForAction(G, pid, plan = { ...NO_CUBES, special: 4 }) {
   return P;
 }
 
+// Разобрать очередь проверок духа: за живым игроком это делает кнопка «Бросить
+// кубик», в тесте — этот помощник. Без него движок стоит и фаза не двигается,
+// что само по себе проверяется отдельно.
+function rollChecks(G, random = makeRandom(), limit = 20) {
+  let n = 0;
+  while (G.pendingChecks.length && !G.winner && n < limit) {
+    mv('rollSpirit')({ G, playerID: G.pendingChecks[0].pid, random });
+    n += 1;
+  }
+  return n;
+}
+
 // Прокрутить фазу конца хода через обычный ход движка.
 function endTurn(G, random = makeRandom()) {
   G.phase = 'actions';
@@ -73,6 +85,7 @@ function endTurn(G, random = makeRandom()) {
   G.players[last].acted = false;
   G.activeCrew = last;
   mv('finishTurn')({ G, playerID: last, random });
+  rollChecks(G, random);
 }
 
 // --- Жетон повреждения выводит из строя компьютер и терминал ---
@@ -607,6 +620,37 @@ const locIn = (color, n = 0) => SECTORS[color][n];
   assert(new Set(dealt.map(c => c.id)).size === dealt.length, 'карты в колоде не дублируются');
 }
 
+// --- Смертельная рана ---
+// Убивает ШЕСТАЯ рана: пять ран персонаж переживает. Числа здесь записаны
+// прямо, а не выведены из HEALTH_DEATH: тест, повторяющий за константой,
+// не заметил бы, если её сдвинуть, — а сдвиг на единицу меняет всю партию.
+{
+  const G = setupG();
+  const pid = pidOf(G, 'artem');
+  const P = readyForAction(G, pid, { ...NO_CUBES, move: 4 });
+  P.pos = 2; P.health = 0; P.invBlocked = 0; P.dead = false; P.inventory = [];
+  G.board[2].hazards.fire = true;
+  G.board[3].hazards.fire = true;          // ходим туда-обратно между двумя пожарами
+  const rnd = makeRandom(); rnd.D6 = () => 6;   // проверка духа всегда провалена
+
+  const step = () => {
+    P.plan.spent.move = 0;                 // в плане всего 4 кубика — обновляем
+    mv('actMove')({ G, playerID: pid, random: rnd }, P.pos === 2 ? 3 : 2);
+    mv('rollSpirit')({ G, playerID: pid, random: rnd });
+  };
+
+  for (const n of [1, 2, 3, 4, 5]) {
+    step();
+    assert(P.health === n, `после ${n}-го входа в пожар ран ${n}, а не ${P.health}`);
+    assert(P.dead === false, `${n} ран(ы) — член экипажа жив`);
+    assert(G.winner === null, `${n} ран(ы) — партия продолжается`);
+  }
+  step();
+  assert(P.health === 6, `набралось шесть ран, а не ${P.health}`);
+  assert(P.dead === true, 'шестая рана убивает');
+  assert(G.winner === 'adel', 'гибель члена экипажа — победа АДЕЛЬ');
+}
+
 // --- playerView: скрытая информация ---
 const view = (G, pid) => Adel.playerView({ G, playerID: pid });
 {
@@ -647,6 +691,28 @@ const view = (G, pid) => Adel.playerView({ G, playerID: pid });
   G.players['2'].knownItems = { 7: 'axe' };
   assert(view(G, '2').players['2'].knownItems['7'] === 'axe', 'свои knownItems видны');
   assert(view(G, '2').players['2'].inventory.every(it => it.id !== 'hidden'), 'свой инвентарь виден');
+}
+{
+  // Здоровье публично: по правилам раны отмечаются кубиком на открытом
+  // планшете, поэтому playerView их не прячет ни от кого — ни от напарника,
+  // ни от АДЕЛЬ, ни от зрителя.
+  const G = setupG();
+  const crew = Object.keys(G.players);
+  crew.forEach((pid, i) => {
+    G.players[pid].health = i + 1;
+    G.players[pid].invBlocked = i % 2;
+  });
+  for (const viewer of [...crew, '0', '9']) {
+    const V = view(G, viewer);
+    for (const pid of crew) {
+      assert(V.players[pid].health === G.players[pid].health,
+        `раны игрока ${pid} видны наблюдателю ${viewer}`);
+      assert(V.players[pid].invBlocked === G.players[pid].invBlocked,
+        `заблокированные ячейки игрока ${pid} видны наблюдателю ${viewer}`);
+      assert(V.players[pid].character === G.players[pid].character,
+        `персонаж игрока ${pid} виден наблюдателю ${viewer} — без него шкалу не построить`);
+    }
+  }
 }
 
 if (failed) { console.error(`\nRULES: провалено проверок — ${failed}`); process.exit(1); }

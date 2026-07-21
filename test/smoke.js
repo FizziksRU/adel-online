@@ -14,10 +14,23 @@ const [adel, c1, c2, c3] = clients;
 const G = () => adel.getState().G;
 const assert = (cond, msg) => { if (!cond) { console.error('FAIL:', msg); console.error(G().log.slice(-8)); process.exit(1); } };
 
+// Проверка духа — отдельное обязательное действие: пока очередь не разобрана,
+// движок стоит и остальные ходы отклоняются. Бросает тот, чья проверка первая.
+const clientOf = { 0: adel, 1: c1, 2: c2, 3: c3 };
+const rollChecks = () => {
+  for (let guard = 0; G().pendingChecks.length && !G().winner && guard < 20; guard++) {
+    clientOf[G().pendingChecks[0].pid].moves.rollSpirit();
+  }
+};
+
 assert(G().phase === 'planning', 'начинаем с планирования');
 assert(G().turnNo === 15, '15 ходов на 4 игроков, got ' + G().turnNo);
 assert(Object.keys(G().players).length === 3, '3 члена экипажа');
 for (let l = 1; l <= 20; l++) assert(G().board[l].items.length === 1, 'предмет в каждой локации');
+
+// Партия может начаться с «Манёвра уклонения» — тогда экипаж бросает кубики
+// ещё до первого планирования.
+rollChecks();
 
 // планы
 c1.moves.commitPlan({ move: 2, search: 1, activate: 0, special: 0, door: 1 });
@@ -51,6 +64,18 @@ if (hand.length && conRows.length) {
   }
 }
 adel.moves.adelEndPhase();
+// Фаза розыгрыша могла упереться в проверку духа за пожар — до броска фаза
+// действий не начинается.
+if (G().pendingChecks.length) {
+  const chk = G().pendingChecks[0];
+  assert(chk.reason === 'fire', 'в розыгрыше проверка ставится за пожар');
+  assert(G().phase === 'reveal', 'до броска фаза не двинулась дальше розыгрыша');
+  const wrong = Object.keys(clientOf).find(p => p !== chk.pid && p !== '0');
+  clientOf[wrong].moves.rollSpirit();
+  assert(G().pendingChecks[0] === chk || G().pendingChecks[0].pid === chk.pid,
+    'бросок за чужую проверку отклонён');
+  rollChecks();
+}
 assert(G().phase === 'actions', 'фаза действий, got ' + G().phase);
 assert(G().adel.hand.length === 4, 'рука АДЕЛЬ добрана до 4, got ' + G().adel.hand.length);
 
@@ -79,6 +104,7 @@ const from = G().players['1'].pos;
 const dest = ADJ[from].find(d => !G().board[from].doors.includes(d) && !G().board[d].doors.includes(from));
 assert(dest != null, 'из локации ' + from + ' есть хотя бы один открытый проём');
 c1.moves.actMove(dest);
+rollChecks();     // вошли в пожар — движение прервано до броска
 assert(G().players['1'].pos === dest, `игрок перешёл в локацию ${dest}, а стоит в ${G().players['1'].pos}`);
 
 c1.moves.actSearch(true);
@@ -89,13 +115,17 @@ for (const [client, pid] of [[c2, '2'], [c3, '3']]) {
   client.moves.claimActive();
   settleHypoxia(client, pid);
   client.moves.finishTurn();
+  rollChecks();   // событие нового хода могло дать «Манёвр уклонения»
 }
 assert(G().turnNo === 14 || G().winner, 'ход перещёлкнулся: ' + G().turnNo + ' winner=' + G().winner);
 assert(G().phase === 'planning' || G().winner, 'новый ход — планирование');
 
 // скрытая информация: экипаж не видит руку АДЕЛЬ
 const v1 = c1.getState().G;
-assert(v1.adel.hand.every(c => c.id === 'hidden'), 'рука АДЕЛЬ скрыта от экипажа');
+// Рука АДЕЛЬ открыта экипажу — решение владельца коробки.
+assert(v1.adel.hand.length === G().adel.hand.length && v1.adel.hand.every(c => c.id !== 'hidden'),
+  'экипаж видит карты в руке АДЕЛЬ');
+assert(typeof v1.adel.deck === 'number', 'порядок колоды АДЕЛЬ при этом закрыт');
 assert(typeof v1.adel.bag === 'number', 'состав мешочка скрыт');
 const hiddenMarkers = Object.values(v1.missions.markers).filter(m => m.loc === null).length;
 assert(hiddenMarkers >= 2, 'часть маркеров скрыта от игрока 1: скрыто ' + hiddenMarkers);
@@ -127,9 +157,18 @@ assert(hiddenItemsFromAdel, 'предметы на поле скрыты от А
   assert(hiddenFrom1 === 2, 'от первого скрыты два чужих маркера, скрыто ' + hiddenFrom1);
 
   // Полный ход: планы → фаза АДЕЛЬ → действия → новый ход.
+  const cl3Of = { 0: adel3, 1: p1, 2: p2 };
+  const roll3 = () => {
+    for (let guard = 0; G3().pendingChecks.length && !G3().winner && guard < 20; guard++) {
+      cl3Of[G3().pendingChecks[0].pid].moves.rollSpirit();
+    }
+  };
+
+  roll3();
   for (const c of [p1, p2]) c.moves.commitPlan({ move: 2, search: 1, activate: 0, special: 0, door: 1 });
   assert(G3().phase === 'adel', 'после планов — фаза АДЕЛЬ, got ' + G3().phase);
   adel3.moves.adelEndPhase();
+  roll3();
   assert(G3().phase === 'actions', 'фаза действий, got ' + G3().phase);
 
   const HYP = ['door', 'activate', 'special', 'search', 'move'];
@@ -143,6 +182,7 @@ assert(hiddenItemsFromAdel, 'предметы на поле скрыты от А
     }
     for (let guard = 0; G3().players[pid].pendingDrop && guard < 5; guard++) c.moves.dropItem(0);
     c.moves.finishTurn();
+    roll3();
   }
   assert(G3().turnNo === 17 || G3().winner, 'ход перещёлкнулся: ' + G3().turnNo);
 

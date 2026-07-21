@@ -8,7 +8,7 @@
     "dev:client": "vite",
     "build": "vite build",
     "start": "node server.js",
-    "test": "node test/smoke.js && node test/rules.js && node test/layout.js && node test/endings.js && node test/specials.js && node test/crew.js && node test/playthrough.js && node test/ui.js && node test/playthrough.js"
+    "test": "node test/smoke.js && node test/rules.js && node test/layout.js && node test/endings.js && node test/specials.js && node test/crew.js && node test/spirit.js && node test/playthrough.js && node test/ui.js"
   },
   "dependencies": {
     "boardgame.io": "^0.50.2",

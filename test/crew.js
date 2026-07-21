@@ -230,6 +230,7 @@ function endTurn(G, random = makeRandom()) {
   G.board[3].hazards.fire = true;
   const rnd = makeRandom(); rnd.D6 = () => 6;
   mv('actMove')({ G, playerID: pid, random: rnd }, 3);
+  mv('rollSpirit')({ G, playerID: pid, random: rnd });   // проверку бросает сам игрок
   assert(P.health === 2, 'рана получена');
   assert(P.invBlocked === 1, 'ячейка инвентаря заблокирована');
   assert(P.pendingDrop === 1, 'из-за раны надо сбросить предмет');

@@ -4,7 +4,7 @@
 // состояние (маркеры миссий, инвентарь, жетон хода) и проверить ровно одно
 // правило. Случайность полностью скриптована.
 import { Adel } from '../src/game/index.js';
-import { HAZARDS } from '../src/game/data.js';
+import { HAZARDS, HEALTH_DEATH } from '../src/game/data.js';
 
 let failed = 0;
 const assert = (cond, msg) => {
@@ -208,8 +208,10 @@ const deliver = (G, pid, itemId, random = makeRandom()) =>
 }
 
 // --- ПОБЕДА АДЕЛЬ: СМЕРТЬ ЧЛЕНА ЭКИПАЖА ---
-// Пятая рана убивает. Раны набираем входом в горящую локацию с заведомо
-// проваленной проверкой духа (d6=6 против духа Артёма 4).
+// Убивает шестая рана: пять ран персонаж переживает. Раны набираем входом в
+// горящую локацию с заведомо проваленной проверкой духа (d6=6 против духа
+// Артёма 4). Проверка духа — отдельное действие: движение упирается в неё,
+// и рана приходит не от входа, а от броска, который игрок делает сам.
 {
   const G = setupG();
   const pid = pidOf(G, 'artem');
@@ -223,20 +225,25 @@ const deliver = (G, pid, itemId, random = makeRandom()) =>
   const rnd = makeRandom();
   rnd.D6 = () => 6;                          // проверка духа всегда провалена
 
-  const route = [7, 6, 7, 6, 7];
+  // Ходим туда-обратно между 6 и 7, пока не наберётся смертельная рана.
+  const route = Array.from({ length: HEALTH_DEATH }, (_, i) => (i % 2 === 0 ? 7 : 6));
   route.forEach((dest, i) => {
     P.plan.spent.move = 0;                   // в плане всего 4 кубика — обновляем
     mv('actMove')({ G, playerID: pid, random: rnd }, dest);
+    assert(G.pendingChecks.length === 1,
+      `вход в пожар ставит проверку духа в очередь (вход ${i + 1})`);
+    assert(G.pendingChecks[0].reason === 'fire', 'причина проверки — пожар');
+    mv('rollSpirit')({ G, playerID: pid, random: rnd });
     const expected = i + 1;
     assert(P.health === expected, `после ${expected}-го входа в пожар ран ${expected}`);
-    if (expected < 5) {
+    if (expected < HEALTH_DEATH) {
       assert(P.dead === false, `${expected} ран(ы) — экипаж жив`);
       assert(G.winner === null, `${expected} ран(ы) — партия продолжается`);
     }
   });
 
-  assert(P.health === 5, 'набрано ровно пять ран');
-  assert(P.dead === true, 'на пятой ране член экипажа погибает');
+  assert(P.health === HEALTH_DEATH, `набрано ровно ${HEALTH_DEATH} ран`);
+  assert(P.dead === true, `на ${HEALTH_DEATH}-й ране член экипажа погибает`);
   assert(G.winner === 'adel', 'смерть члена экипажа — победа АДЕЛЬ');
 }
 

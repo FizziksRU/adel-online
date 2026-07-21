@@ -2,13 +2,17 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   ADJ, SECTOR_OF, SECTOR_NAMES, TERMINALS, TERMINAL_NAMES, HATCHES, SPACE_NEAR,
   CHARACTERS, ITEMS, HAZARD_NAMES, HAZARD_ICON, EVENTS, ANOMALIES, ANOMALY_COST, MARKER_SLOTS,
-  CONSOLE_COSTS, CONSOLE_LAYOUT, CONSOLE_ORDER,
   ACTION_NAMES, SPACE_SECTIONS, SPACE_NAMES, SPACE_ADJ,
   ADEL_HAND_LIMIT,
 } from '../game/data.js';
 
-import { hazardCardRules, ATTACK_CARD } from '../game/index.js';
-import { AdelCardPicker, chooseCardLoc, cardLabel } from './AdelCards.jsx';
+import {
+  hazardCardRules, ATTACK_CARD, specialPlan, clearHazardTargets, computerBlockedWhy,
+} from '../game/index.js';
+import { AdelCardPicker, chooseCardLoc, cardLabel, CardLabel, LocNum, availableTypes } from './AdelCards.jsx';
+import { AdelConsole } from './Console.jsx';
+import { SpiritPrompt, RollOverlay, LastRoll, rollShowPlan } from './SpiritRoll.jsx';
+import { HealthTrack, CrewRoster } from './Health.jsx';
 import { POS, PAD, BOX_W, BOX_H, CELL_X, CELL_Y, xy, gridMax } from './layout.js';
 
 const SECTOR_TINT = { green: '#2f7d4f', yellow: '#b08a1e', grey: '#5d6b78', red: '#a33b3b', blue: '#3763a8' };
@@ -30,7 +34,13 @@ const MOVE_NAMES = {
   adelPlayCard: 'сыграть карту', adelDiscard: 'сбросить карту',
   adelActivateAnomaly: 'активировать аномалию', adelAttack: 'атака',
   adelSpyMarker: 'шпионаж', adelEndPhase: 'завершить фазу', adelEndEvent: 'закрыть окно атаки',
+  rollSpirit: 'бросок кубика',
 };
+
+// Уважение к prefers-reduced-motion проверяется здесь, а не только в CSS:
+// сама фаза «крутится» прячет подпись, и её нужно пропустить целиком.
+const reducedMotion = () => typeof window !== 'undefined' && !!window.matchMedia
+  && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // Все фишки АДЕЛЬ, лежащие сейчас на поле, — из них оплачивается аномалия.
 // Дверь на стыке секторов годится за любой из двух цветов.
@@ -58,18 +68,6 @@ function remainingColors(anomaly, pays) {
     if (i >= 0) need.splice(i, 1);
   }
   return need;
-}
-
-// Одна колонка консоли АДЕЛЬ сверху вниз: ячейки нужного вида, занятые —
-// снизу (новые фишки ложатся в самые дешёвые, снимаются самые дорогие).
-function consoleColumn(A, cost) {
-  const cells = [];
-  for (const h of CONSOLE_ORDER) {
-    const capacity = CONSOLE_LAYOUT[cost]?.[h] || 0;
-    const filled = (A.console[h] || []).filter(c => c === cost).length;
-    for (let i = 0; i < capacity; i++) cells.push({ type: h, on: i < filled });
-  }
-  return cells.reverse();
 }
 
 export function Board({ G, ctx, moves: rawMoves, playerID }) {
@@ -107,6 +105,25 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
   }), [rawMoves]);
 
   const planTotal = Object.values(plan).reduce((a, b) => a + b, 0);
+
+  // ---- анимация кубика: новый G.lastRoll → оверлей у всех ----
+  // Что показывать, решает rollShowPlan (она же и проверяется тестом); здесь
+  // остаётся только завести таймеры. Первый рендер ничего не проигрывает —
+  // иначе при переподключении заново крутился бы давно сыгранный бросок.
+  const seenSeq = useRef(G.lastRoll?.seq || 0);
+  const [shown, setShown] = useState(null);     // { roll, spinning } или null
+  useEffect(() => {
+    const plan = rollShowPlan(G.lastRoll, seenSeq.current, reducedMotion());
+    if (!plan) return;
+    seenSeq.current = plan.seq;
+    setShown({ roll: G.lastRoll, spinning: plan.spin > 0 });
+    // Таймеры сверяются с seq: бросков подряд бывает несколько (проверка у
+    // всего экипажа), и таймер прошлого не должен гасить чужой оверлей.
+    if (plan.spin) {
+      later(() => setShown(s => (s?.roll.seq === plan.seq ? { ...s, spinning: false } : s)), plan.spin);
+    }
+    later(() => setShown(s => (s?.roll.seq === plan.seq ? null : s)), plan.hold);
+  }, [G.lastRoll?.seq]);
 
   // ---- клик по локации на карте: маршрутизация по текущему выбору ----
   const clickLoc = (l) => {
@@ -190,16 +207,41 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
 
   const cubesLeft = (k) => myP?.plan ? myP.plan[k] - myP.plan.spent[k] : 0;
 
-  const specialBtn = (label, mkSel, opts = {}) => (
-    <div className="specialrow" key={label}>
-      <span>{label}</span>
-      <span>
-        <button onClick={() => mkSel(false)}>3⬛</button>
-        {CHARACTERS[myP.character].special !== 'cheap_special' &&
-          <button onClick={() => mkSel(true)} title="2 кубика + проверка духа">2⬛+🎲</button>}
-      </span>
-    </div>
-  );
+  // Кнопка спец. действия. Цену и доступность считает движок (specialPlan) —
+  // тем же кодом, которым он потом проверит ход. Раньше кнопка была всегда
+  // нажимаемой: не хватало кубика из-за тьмы или «вредоносной программы» —
+  // ход молча отклонялся, и игрок не понимал, что произошло.
+  const specialBtn = (label, mkSel, opts = {}) => {
+    const cheap = CHARACTERS[myP.character].special === 'cheap_special';
+    const row = (risky) => {
+      const p = specialPlan(G, me, { risky });
+      const blocked = opts.why || (p.can ? null : `нужно кубиков: ${p.need}, есть ${p.have}`);
+      const label = `${p.cost}⬛${p.tax ? ` +${p.tax}` : ''}${risky ? '+🎲' : ''}`;
+      const title = (p.tax ? `доплата ${p.tax} за тьму / «вредоносную программу». ` : '')
+        + (blocked ? `Недоступно: ${blocked}` : (risky ? '2 кубика + проверка духа' : 'без проверки духа'));
+      return <button key={risky ? 'r' : 'n'} disabled={!!blocked} title={title}
+        onClick={() => mkSel(risky)}>{label}</button>;
+    };
+    return (
+      <div className="specialrow" key={label}>
+        <span>{label}</span>
+        <span>{row(false)}{!cheap && row(true)}</span>
+      </div>
+    );
+  };
+
+  // «Убрать фишку» — цели считает движок. Если цель одна (а так почти всегда:
+  // игрок стоит на самой фишке), делаем сразу, без похода на карту.
+  const clearHazardBtn = (h) => {
+    const targets = clearHazardTargets(G, me, h);
+    const why = computerBlockedWhy(G, me)
+      || (targets.length ? null : `рядом нет фишки «${HAZARD_NAMES[h]}»`);
+    return specialBtn(`Убрать «${HAZARD_NAMES[h]}»${targets.length ? ` · лок. ${targets.join(', ')}` : ''}`,
+      (risky) => {
+        if (targets.length === 1) moves.actSpecial({ kind: 'clearHazard', hazard: h, loc: targets[0], risky });
+        else setSel({ kind: 'clearHazard', hazard: h, risky, targets });
+      }, { why });
+  };
 
   // Долг по сбросу может свалиться и на неактивного игрока: например, ему
   // передали предмет терминалом доставки. Пока он не разберётся, ход команды
@@ -314,8 +356,7 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
         <h4>Специальное действие</h4>
         {P.inventory.filter(it => ITEMS[it.id]?.kind === 'key').map((it) =>
           specialBtn(`Доставить: ${ITEMS[it.id].name}`, (risky) => moves.actSpecial({ kind: 'deliver', itemId: it.id, risky })))}
-        {!P.inSpace && ['spy', 'hypoxia', 'darkness'].map(h =>
-          specialBtn(`Убрать «${HAZARD_NAMES[h]}» (своя/соседняя)`, (risky) => setSel({ kind: 'clearHazard', hazard: h, risky })))}
+        {!P.inSpace && ['spy', 'hypoxia', 'darkness'].map(h => clearHazardBtn(h))}
         {term === 'medical' && specialBtn('Мед. терминал: вылечить все раны', (risky) => moves.actSpecial({ kind: 'terminal', risky }))}
         {term === 'command' && specialBtn('Командный: точка невозврата −1', (risky) => moves.actSpecial({ kind: 'terminal', risky }))}
         {term === 'repair' && specialBtn('Ремонтный: убрать повреждение', (risky) => setSel({ kind: 'repairTerminal', risky }))}
@@ -355,103 +396,109 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
     );
   };
 
+  // ---- консоль: выбор вида фишки кликом по занятой ячейке ----
+  // Законные виды считает тот же код, что и панель карты, а он — тем же
+  // hazardCardRules, которым ход потом проверит движок.
+  const cardSel = isAdel && sel?.kind === 'adelCard' && !sel.hz ? sel : null;
+  const cardTypes = cardSel ? availableTypes(G, hazardCardRules(G, cardSel.card)) : null;
+  const canPickType = cardTypes ? (hz) => cardTypes.includes(hz) : null;
+  const pickType = (hz) => setSel({ ...cardSel, hz });
+  // Аномалию АДЕЛЬ активирует прямо с её ячейки на консоли; чем платить —
+  // спрашивается отдельной панелью в сайдбаре.
+  const canActivateAnomaly = isAdel && G.phase === 'adel' && G.adel.energy >= ANOMALY_COST
+    ? (a) => setSel({ kind: 'anomalyPay', anomaly: a, pays: [], payType: null })
+    : null;
+
   const renderAdel = () => {
     const A = G.adel;
     const phaseAdel = G.phase === 'adel';
     return (
       <div className="panel adel">
-        <h3>Консоль АДЕЛЬ · ⚡ {A.energy}</h3>
-        <div className="console">
-          {CONSOLE_COSTS.map(cost => (
-            <div className="concol" key={cost}>
-              <div className="cells">
-                {consoleColumn(A, cost).map((cell, i) => (
-                  <i key={i} className={cell.on ? 'chip on' : 'chip'}
-                    title={`${HAZARD_NAMES[cell.type]} — ${cost}⚡${cell.on ? '' : ' (пусто)'}`}>
-                    {HAZARD_ICON[cell.type]}
-                  </i>
-                ))}
-              </div>
-              <span className="concost">{cost}⚡</span>
-            </div>
-          ))}
-        </div>
-        <p className="hint">Мешочек: {typeof A.bag === 'number' ? A.bag : Object.values(A.bag).reduce((a, b) => a + b, 0)} фишек · Колода: {A.deck} · Сброс фишек: {A.chipDiscard.length}</p>
-
-        {isAdel && <>
-          <h4>Рука ({A.hand.length}/{ADEL_HAND_LIMIT})</h4>
-          <div className="btns">
-            {A.hand.map(c => (
-              <button key={c.id} className={sel?.card?.id === c.id ? 'sel' : ''} disabled={!phaseAdel}
-                onClick={() => setSel({ kind: 'adelCard', card: c })}
-                title={c.type === 'special' ? c.text : 'Карта локаций'}>
-                {cardLabel(c)}
-              </button>
-            ))}
-          </div>
-          {sel?.kind === 'adelCard' &&
-            <AdelCardPicker G={G} sel={sel} setSel={setSel} moves={moves} />}
-
-          <h4>Аномалии</h4>
-          <div className="btns">
-            {A.anomalies.map((a, i) => a === 'hidden' ? <button key={i} disabled>▩ скрыта</button> :
-              G.anomaliesActive.includes(a) ? <button key={i} disabled>✓ {ANOMALIES[a].name}</button> :
-                <button key={i} disabled={!phaseAdel || A.energy < ANOMALY_COST}
-                  onClick={() => setSel({ kind: 'anomalyPay', anomaly: a, pays: [], payType: null })}>
-                  {ANOMALIES[a].name} · {ANOMALY_COST}⚡ + фишки: {ANOMALIES[a].colors.map(c => SECTOR_NAMES[c]).join(', ')}
-                </button>)}
-          </div>
-          {sel?.kind === 'anomalyPay' && (() => {
-            const need = remainingColors(sel.anomaly, sel.pays);
-            const chosen = new Set(sel.pays.map(p => p.id));
-            const options = boardChips(G).filter(c => !chosen.has(c.id) && c.colors.some(col => need.includes(col)));
-            const pick = (chip) => {
-              const pays = [...sel.pays, chip];
-              if (pays.length < ANOMALIES[sel.anomaly].colors.length) { setSel({ ...sel, pays }); return; }
-              moves.adelActivateAnomaly(sel.anomaly,
-                pays.map(p => ({ loc: p.loc, type: p.type, door: p.door, slot: p.slot })));
-              setSel(null);
-            };
-            return <div className="picker">
-              <p>«{ANOMALIES[sel.anomaly].name}» · {ANOMALY_COST}⚡ — снимите с поля по фишке из секторов:{' '}
-                {need.map(c => <i key={c} className={'hex ' + c} title={SECTOR_NAMES[c]} />)}
-                {sel.pays.length > 0 && <> · выбрано: {sel.pays.map(p => p.label).join(', ')}</>}</p>
-              {options.length === 0
-                ? <p className="error">На поле нет фишек нужных цветов — аномалию пока не активировать.</p>
-                : options.map(c => <button key={c.id} onClick={() => pick(c)}>
-                  {c.label} {c.colors.map(col => <i key={col} className={'hex ' + col} title={SECTOR_NAMES[col]} />)}
-                </button>)}
-              <button onClick={() => setSel(null)}>Отмена</button>
-            </div>;
-          })()}
-
-          {/* «Атака» разыгрывается в окне фазы событий — до того, как экипаж
-              распределит кубики. Выбор цели идёт тем же пикером, что и у карт,
-              поэтому доступны и дверь, и выбор компьютер/терминал. */}
-          {G.anomaliesActive.includes('attack') && <div className="btns">
-            <button disabled={G.phase !== 'event' || G.attackUsedThisTurn}
-              onClick={() => setSel({ kind: 'adelCard', card: ATTACK_CARD_UI })}>
-              ⚔ Атака: фишка в сектор цвета события ({SECTOR_NAMES[G.currentEvent.color]})
+        <h3>АДЕЛЬ</h3>
+        {/* Рука открыта всем: экипаж видит те же карты, что и АДЕЛЬ. Играть
+            ими, разумеется, может только она — у остальных это просто список. */}
+        <h4>Рука АДЕЛЬ ({A.hand.length}/{ADEL_HAND_LIMIT})</h4>
+        {/* Ключ — по номеру в руке, а не по id карты: закрытые карты приходят
+            с одинаковым id, и React склеивал их в одну строку месива. */}
+        <div className="btns">
+          {A.hand.map((c, i) => (isAdel
+            ? <button key={i} className={sel?.card?.id === c.id ? 'sel' : ''} disabled={!phaseAdel}
+              onClick={() => setSel({ kind: 'adelCard', card: c })}
+              title={c.type === 'special' ? c.text : cardLabel(c)}>
+              <CardLabel card={c} />
             </button>
-          </div>}
-          {G.phase === 'event' && <button className="primary finish" onClick={() => { moves.adelEndEvent(); setSel(null); }}>
-            Закрыть окно атаки — экипаж планирует
-          </button>}
+            : <span key={i} className="handcard" title={c.type === 'special' ? c.text : cardLabel(c)}>
+              <CardLabel card={c} />
+            </span>))}
+        </div>
+        <p className="hint">Колода: {A.deck} карт · сброс: {typeof A.discard === 'number' ? A.discard : A.discard.length}
+          {' '}(состав колоды и сброса закрыт — иначе обе стороны знали бы ход событий наперёд)</p>
+        {!isAdel && <p className="hint">Аномалии АДЕЛЬ — на консоли под картой, там же видно, чем платится каждая.</p>}
+        {/* Дальше — пульт самой АДЕЛЬ: выбор целей, оплата аномалии,
+            шпионаж, завершение фазы. Экипажу тут нажимать нечего. */}
+        {isAdel && <>
+        {sel?.kind === 'adelCard' &&
+          <AdelCardPicker G={G} sel={sel} setSel={setSel} moves={moves} />}
 
-          <h4>Шпионаж</h4>
-          <div className="btns">
-            {Object.entries(G.players).filter(([, p]) => !p.inSpace && !p.dead && G.board[p.pos]?.hazards.spy).map(([pid, p]) =>
-              MARKER_SLOTS.filter(s => G.missions.viewers[s].includes(pid)).map(s =>
-                <button key={pid + s} onClick={() => moves.adelSpyMarker(pid, s)}>
-                  👁 {CHARACTERS[p.character].name}: маркер «{ITEMS[s].name}» (50/50)</button>))}
-          </div>
-          {A.spyNotes.length > 0 && <div className="notes">
-            {A.spyNotes.map((n, i) => <p key={i}>Ход {n.turn}: «{ITEMS[n.slot].name}» → {n.value === 'X' ? '✖ (возможно, пустышка)' : `локация ${n.value}`}</p>)}
-          </div>}
+        {/* Сами жетоны аномалий лежат на консоли — там же и активируются.
+            Здесь остаётся только выбор, чем платить. */}
+        <h4>Аномалии</h4>
+        <p className="hint">
+          {phaseAdel && A.energy >= ANOMALY_COST
+            ? `Жетоны — на консоли под картой: кликните по жетону, чтобы активировать за ${ANOMALY_COST}⚡ и фишки с поля.`
+            : `Жетоны — на консоли под картой. Активация стоит ${ANOMALY_COST}⚡ и по фишке из сектора каждого цвета, только в свою фазу.`}
+        </p>
+        {sel?.kind === 'anomalyPay' && (() => {
+          const need = remainingColors(sel.anomaly, sel.pays);
+          const chosen = new Set(sel.pays.map(p => p.id));
+          const options = boardChips(G).filter(c => !chosen.has(c.id) && c.colors.some(col => need.includes(col)));
+          const pick = (chip) => {
+            const pays = [...sel.pays, chip];
+            if (pays.length < ANOMALIES[sel.anomaly].colors.length) { setSel({ ...sel, pays }); return; }
+            moves.adelActivateAnomaly(sel.anomaly,
+              pays.map(p => ({ loc: p.loc, type: p.type, door: p.door, slot: p.slot })));
+            setSel(null);
+          };
+          return <div className="picker">
+            <p>«{ANOMALIES[sel.anomaly].name}» · {ANOMALY_COST}⚡ — снимите с поля по фишке из секторов:{' '}
+              {need.map(c => <i key={c} className={'hex ' + c} title={SECTOR_NAMES[c]} />)}
+              {sel.pays.length > 0 && <> · выбрано: {sel.pays.map(p => p.label).join(', ')}</>}</p>
+            {options.length === 0
+              ? <p className="error">На поле нет фишек нужных цветов — аномалию пока не активировать.</p>
+              : options.map(c => <button key={c.id} onClick={() => pick(c)}>
+                {c.label} {c.colors.map(col => <i key={col} className={'hex ' + col} title={SECTOR_NAMES[col]} />)}
+              </button>)}
+            <button onClick={() => setSel(null)}>Отмена</button>
+          </div>;
+        })()}
 
-          {phaseAdel && <button className="primary finish" onClick={() => { moves.adelEndPhase(); setSel(null); }}>
-            Завершить фазу АДЕЛЬ (добор + энергия)
-          </button>}
+        {/* «Атака» разыгрывается в окне фазы событий — до того, как экипаж
+            распределит кубики. Выбор цели идёт тем же пикером, что и у карт,
+            поэтому доступны и дверь, и выбор компьютер/терминал. */}
+        {G.anomaliesActive.includes('attack') && <div className="btns">
+          <button disabled={G.phase !== 'event' || G.attackUsedThisTurn}
+            onClick={() => setSel({ kind: 'adelCard', card: ATTACK_CARD_UI })}>
+            ⚔ Атака: фишка в сектор цвета события ({SECTOR_NAMES[G.currentEvent.color]})
+          </button>
+        </div>}
+        {G.phase === 'event' && <button className="primary finish" onClick={() => { moves.adelEndEvent(); setSel(null); }}>
+          Закрыть окно атаки — экипаж планирует
+        </button>}
+
+        <h4>Шпионаж</h4>
+        <div className="btns">
+          {Object.entries(G.players).filter(([, p]) => !p.inSpace && !p.dead && G.board[p.pos]?.hazards.spy).map(([pid, p]) =>
+            MARKER_SLOTS.filter(s => G.missions.viewers[s].includes(pid)).map(s =>
+              <button key={pid + s} onClick={() => moves.adelSpyMarker(pid, s)}>
+                👁 {CHARACTERS[p.character].name}: маркер «{ITEMS[s].name}» (50/50)</button>))}
+        </div>
+        {A.spyNotes.length > 0 && <div className="notes">
+          {A.spyNotes.map((n, i) => <p key={i}>Ход {n.turn}: «{ITEMS[n.slot].name}» → {n.value === 'X' ? '✖ (возможно, пустышка)' : `локация ${n.value}`}</p>)}
+        </div>}
+
+        {phaseAdel && <button className="primary finish" onClick={() => { moves.adelEndPhase(); setSel(null); }}>
+          Завершить фазу АДЕЛЬ (добор + энергия)
+        </button>}
         </>}
       </div>
     );
@@ -516,28 +563,50 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
   const ev = G.currentEvent && EVENTS[G.currentEvent.id];
   const nx = G.nextEvent && EVENTS[G.nextEvent.id];
 
+  // Фаза и событие переехали из шапки в сайдбар: под фазой сразу идёт то, что
+  // от игрока в этой фазе требуется, — планирование, действия, разбор гипоксии.
+  const renderPhase = () => (
+    <div className="panel phasebox">
+      <h3>Фаза · ход {G.turnNo}</h3>
+      <p className="phase">
+        {G.winner ? (G.winner === 'crew' ? '🎉 ПОБЕДА ЭКИПАЖА' : '🤖 ПОБЕДА АДЕЛЬ') :
+          { event: '⚔ События: атака АДЕЛЬ', planning: '📝 Планирование', adel: '🤖 Фаза АДЕЛЬ',
+            actions: '🚀 Фаза действий', reveal: '👀 Розыгрыш', endturn: '⏳ Конец хода' }[G.phase]}
+      </p>
+      <div className="event">
+        {ev && <span className={G.currentEvent.cancelled ? 'cancelled' : ''}>
+          Событие: <b>{ev.name}</b> <i className={'hex ' + G.currentEvent.color} title={`цвет: ${SECTOR_NAMES[G.currentEvent.color]}`} />
+          {G.currentEvent.panic && <span title="значок паники: сработает одноимённая аномалия">😱</span>} — {ev.text}
+        </span>}
+        {nx && <span className="next">Далее: {nx.name}
+          {G.nextEvent.color && <i className={'hex ' + G.nextEvent.color} title={`цвет: ${SECTOR_NAMES[G.nextEvent.color]}`} />}
+          {G.nextEvent.panic && '😱'}{G.nextEvent.cancelled ? ' (отменено)' : ''}</span>}
+      </div>
+      {/* Анимация кубика живёт несколько секунд, и застать её может не каждый.
+          Итог последнего броска остаётся здесь, пока не случится следующий. */}
+      <LastRoll G={G} />
+    </div>
+  );
+
   return (
     <div className="game">
       <header>
         <div className="logo small">А.Д.Е.Л.Ь.</div>
-        <div className="phase">
-          {G.winner ? (G.winner === 'crew' ? '🎉 ПОБЕДА ЭКИПАЖА' : '🤖 ПОБЕДА АДЕЛЬ') :
-            { event: '⚔ Фаза событий: атака АДЕЛЬ', planning: '📝 Планирование', adel: '🤖 Фаза АДЕЛЬ', actions: '🚀 Фаза действий', reveal: '👀 Розыгрыш', endturn: '⏳ Конец хода' }[G.phase]}
-        </div>
-        <div className="event">
-          {ev && <span className={G.currentEvent.cancelled ? 'cancelled' : ''}>
-            Событие: <b>{ev.name}</b> <i className={'hex ' + G.currentEvent.color} title={`цвет: ${SECTOR_NAMES[G.currentEvent.color]}`} />
-            {G.currentEvent.panic && <span title="значок паники: сработает одноимённая аномалия">😱</span>} — {ev.text}
-          </span>}
-          {nx && <span className="next">Далее: {nx.name}
-            {G.nextEvent.color && <i className={'hex ' + G.nextEvent.color} title={`цвет: ${SECTOR_NAMES[G.nextEvent.color]}`} />}
-            {G.nextEvent.panic && '😱'}{G.nextEvent.cancelled ? ' (отменено)' : ''}</span>}
-        </div>
+        <div className="phase">Ход {G.turnNo} · точка невозврата {G.pointOfNoReturn}</div>
       </header>
 
       <div className="cols">
         <div className="mapwrap">
-          {sel && <div className="selbanner">Выберите цель на карте… <button onClick={() => setSel(null)}>отмена</button></div>}
+          {/* Плашка выбора цели закреплена на экране, а не приклеена к карте:
+              карта больше не «липкая» (под ней консоль), и при прокрутке к
+              панели действий подсказка уезжала за верхний край — казалось,
+              что кнопка просто не работает. */}
+          {sel && <div className="selbanner">
+            Выберите цель на карте
+            {sel.targets?.length ? <>: {sel.targets.map(l =>
+              <button key={l} className="seltarget" onClick={() => { clickLoc(l); }}>лок. {l}</button>)}</> : '…'}
+            <button onClick={() => setSel(null)}>отмена</button>
+          </div>}
           {/* viewBox обязателен: без него max-width сжимает рамку, а содержимое
               остаётся 1:1 и обрезается по краю */}
           <svg width={mapW} height={mapH} viewBox={`0 0 ${mapW} ${mapH}`}
@@ -574,20 +643,28 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
               return <span key={s} className="ssec">{SPACE_NAMES[s]}{who.map(([pid, p]) => <b key={pid}> · {CHARACTERS[p.character].name}</b>)}</span>;
             })}
           </div>
+
+          {/* Консоль — под картой и на всю ширину, как планшет на столе. Она
+              открыта всем: в жизни он тоже лежит лицом вверх. */}
+          <AdelConsole G={G} numPlayers={G.numPlayers}
+            canPickType={canPickType} onPickType={pickType}
+            onActivateAnomaly={canActivateAnomaly} />
         </div>
 
         <div className="side">
           {G.winner && <div className="panel winner">{G.winner === 'crew' ? '🎉 Экипаж побеждает!' : '🤖 АДЕЛЬ побеждает.'}</div>}
-          {!isAdel && myP && <div className="panel me">
-            <h3>{CHARACTERS[myP.character].name} · дух {CHARACTERS[myP.character].spirit}</h3>
-            <p>❤ Раны: {myP.health}/5 {myP.dead && '☠'} · Позиция: {myP.inSpace ? `космос, ${SPACE_NAMES[myP.inSpace]}` : myP.pos}</p>
-          </div>}
+          {/* Отдельной панели «мой персонаж» нет: имя, дух и шкала ран уже есть
+              в списке экипажа, а вторая копия только занимала место. */}
+          <CrewRoster G={G} me={me} />
+          {renderPhase()}
           {/* myP отсутствует у наблюдателя и при чужом playerID — без проверки
               весь экран падал бы на первом же обращении к полям игрока */}
           {!isAdel && !G.winner && myP && !myP.dead && myP.pendingHypoxia > 0 && renderHypoxia()}
           {!isAdel && !G.winner && myP && !myP.dead && myP.pendingDrop > 0 && !active && renderDropOnly()}
           {!isAdel && !G.winner && myP && !myP.dead && G.phase === 'planning' && renderPlanning()}
           {!isAdel && !G.winner && myP && !myP.dead && G.phase === 'actions' && renderActions()}
+          {/* Панель АДЕЛЬ видят все: её рука открыта. Пульт внутри —
+              только для неё самой. */}
           {renderAdel()}
           {renderMissions()}
           {!isAdel && G.privateLog?.length > 0 && <div className="panel log private">
@@ -601,6 +678,11 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
           {msg && <div className="toast">{msg}</div>}
         </div>
       </div>
+
+      {/* Проверка духа перекрывает всё: пока свой кубик не брошен, других
+          действий нет. У зрителя и АДЕЛЬ вместо кнопки — строка ожидания. */}
+      <SpiritPrompt G={G} playerID={me} moves={moves} />
+      {shown && <RollOverlay G={G} roll={shown.roll} spinning={shown.spinning} />}
     </div>
   );
 }

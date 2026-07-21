@@ -4,15 +4,49 @@
 // компонент принимает выбор пропсом, а не прячет его в своём useState.
 import React from 'react';
 import {
-  ADJ, TERMINALS, HAZARD_NAMES, SPECIAL_REDRAW_MAX, SPECIAL_RECHIP_MAX,
+  ADJ, TERMINALS, HAZARD_NAMES, SECTOR_OF, SPECIAL_REDRAW_MAX, SPECIAL_RECHIP_MAX,
 } from '../game/data.js';
 import { hazardCardRules, consoleFree, ATTACK_CARD } from '../game/index.js';
 
 const ALL_LOCS = Array.from({ length: 20 }, (_, i) => i + 1);
 const countBy = (arr) => arr.reduce((acc, x) => ({ ...acc, [x]: (acc[x] || 0) + 1 }), {});
 
-// Подпись карты в руке и в сбросе АДЕЛЬ.
-export const cardLabel = (c) => (c.type === 'loc' ? `Локации ${c.locs.join(' / ')}` : `★ ${c.name}`);
+// Виды фишек, которыми эту карту вообще можно сыграть: нужна и фишка на
+// консоли, и хоть одна законная локация. Считается одним кодом и для подсказки
+// в панели карты, и для того, какие ячейки консоли станут кликабельными, —
+// иначе панель и консоль разошлись бы в том, что доступно.
+export function availableTypes(G, rules) {
+  if (!rules) return [];
+  return rules.types.filter(hz => G.adel.console[hz]?.length && ALL_LOCS.some(l => rules.allowed(l, hz)));
+}
+
+// Цена выкладывания этим видом: консольная (самая дорогая фишка вида) плюс
+// собственная цена карты — ровно как считает движок.
+export const chipPrice = (G, card, rules, hz) =>
+  (rules.payConsole ? (G.adel.console[hz]?.at(-1) ?? 0) : 0) + (card.cost || 0);
+
+// Закрытая карта — та, у которой сервер вырезал поля. Так отдаёт состояние
+// сервер, который ещё прячет руку АДЕЛЬ; экран от этого падать не должен.
+const isFaceDown = (c) => !c || (c.type !== 'loc' && !c.name);
+
+// Подпись карты голым текстом — для атрибута title и для сравнений.
+export const cardLabel = (c) => {
+  if (isFaceDown(c)) return '▩ закрытая карта';
+  return c.type === 'loc' ? `Локации ${c.locs.join(' / ')}` : `★ ${c.name}`;
+};
+
+// Номер локации цветом её сектора: по одной цифре видно, куда бьёт карта,
+// не сверяясь с картой корабля. Цвета берутся из разбиения на секторы, а не
+// вписаны в разметку руками.
+export const LocNum = ({ loc }) => <b className={'sect ' + SECTOR_OF[loc]}>{loc}</b>;
+
+// Та же подпись, но с цветными номерами — для показа на экране.
+export function CardLabel({ card: c }) {
+  if (isFaceDown(c)) return <>▩ закрытая карта</>;
+  if (c.type !== 'loc') return <>★ {c.name}</>;
+  return <>Локации {c.locs.map((l, i) =>
+    <React.Fragment key={i}>{i > 0 ? ' / ' : ''}<LocNum loc={l} /></React.Fragment>)}</>;
+}
 
 // Куда уходит выкладывание: обычная карта играется adelPlayCard, а аномалия
 // «Атака» — своим ходом. Всё остальное (подбор целей, уточнение двери и
@@ -32,19 +66,22 @@ export function chooseCardLoc({ moves, setSel, card, hz, loc }) {
 // Законные цели считает hazardCardRules — тот же код, которым ход потом
 // проверит движок. Так интерфейс не может предложить отклоняемый ход.
 function HazardCard({ G, sel, setSel, moves, rules }) {
-  const A = G.adel, card = sel.card;
+  const card = sel.card;
   // Цена в подсказке считается тем же правилом, что и в движке.
-  const price = (hz) => (rules.payConsole ? (A.console[hz].at(-1) ?? 0) : 0) + (card.cost || 0);
+  const price = (hz) => chipPrice(G, card, rules, hz);
 
   if (!sel.hz) {
-    const types = rules.types.filter(hz => A.console[hz]?.length && ALL_LOCS.some(l => rules.allowed(l, hz)));
+    const types = availableTypes(G, rules);
     if (types.length === 0) {
       return <p className="error">Нет ни подходящей фишки на консоли, ни законной локации для этой карты.</p>;
     }
+    // Сам выбор вида делается на консоли — кликом по занятой ячейке нужного
+    // ряда, как на физическом планшете. Здесь остаётся только подсказка с
+    // ценами: что почём, по ячейке не прочитать.
     return <>
-      <p>Какую фишку выложить? С консоли снимается самая дорогая.</p>
-      {types.map(hz => <button key={hz} onClick={() => setSel({ ...sel, hz })}>
-        {HAZARD_NAMES[hz]} (−{price(hz)}⚡)</button>)}
+      <p>Какую фишку выложить? Кликните по занятой ячейке нужного вида на консоли —
+        с неё снимется самая дорогая фишка. Доступно:{' '}
+        {types.map((hz, i) => <b key={hz}>{i > 0 ? ', ' : ''}{HAZARD_NAMES[hz]} (−{price(hz)}⚡)</b>)}</p>
     </>;
   }
 
@@ -53,7 +90,7 @@ function HazardCard({ G, sel, setSel, moves, rules }) {
     return <>
       <p>«{HAZARD_NAMES[sel.hz]}» за {price(sel.hz)}⚡ — в какую локацию? Можно кликнуть по карте.</p>
       {locs.map(l => <button key={l}
-        onClick={() => chooseCardLoc({ moves, setSel, card, hz: sel.hz, loc: l })}>Локация {l}</button>)}
+        onClick={() => chooseCardLoc({ moves, setSel, card, hz: sel.hz, loc: l })}>Локация <LocNum loc={l} /></button>)}
       <button onClick={() => setSel({ kind: 'adelCard', card })}>← другая фишка</button>
     </>;
   }
@@ -62,7 +99,7 @@ function HazardCard({ G, sel, setSel, moves, rules }) {
   if (sel.hz === 'door') return <>
     <p>Какой проём заблокировать из локации {sel.loc}?</p>
     {ADJ[sel.loc].map(nb => <button key={nb} onClick={() => place({ loc: sel.loc, door: nb })}>
-      Дверь {sel.loc}↔{nb}</button>)}
+      Дверь <LocNum loc={sel.loc} />↔<LocNum loc={nb} /></button>)}
   </>;
   return <>
     <p>Что заблокировать в локации {sel.loc}?</p>
@@ -78,7 +115,7 @@ function RecallCard({ G, play }) {
   if (!A.discard.length) return <p className="error">Сброс пуст — возвращать нечего.</p>;
   return <>
     <p>Какую карту вернуть на верх колоды?</p>
-    {A.discard.map(c => <button key={c.id} onClick={() => play({ cardId: c.id })}>{cardLabel(c)}</button>)}
+    {A.discard.map((c, i) => <button key={i} onClick={() => play({ cardId: c.id })}><CardLabel card={c} /></button>)}
   </>;
 }
 
@@ -94,7 +131,7 @@ function RedrawCard({ G, sel, setSel, play, paid }) {
       Сама карта сбрасывается всегда.</p>
     {others.map(c => <button key={c.id} className={picked.includes(c.id) ? 'sel' : ''}
       disabled={!picked.includes(c.id) && picked.length >= SPECIAL_REDRAW_MAX}
-      onClick={() => toggle(c.id)}>{cardLabel(c)}</button>)}
+      onClick={() => toggle(c.id)}><CardLabel card={c} /></button>)}
     <button className="primary" onClick={() => play({ cardIds: picked })}>
       Сбросить {picked.length + 1} и взять столько же{paid}</button>
   </>;

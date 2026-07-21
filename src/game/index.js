@@ -4,7 +4,7 @@ import {
   HATCHES, SPACE_ADJ, SPACE_NEAR, CHARACTERS, ITEMS, LAB_STACK,
   randomPool, BOARD_FIXED, RANDOM_DRAW,
   HAZARDS, HAZARD_NAMES, BAG_COUNTS, CONSOLE_COSTS, CONSOLE_LAYOUT,
-  CUBE_ACTIONS, ACTION_NAMES,
+  CUBE_ACTIONS, ACTION_NAMES, HEALTH_DEATH, SPIRIT_REASONS, SPIRIT_MOD_NAMES,
   EVENTS, EVENT_DECK,
   ADEL_CARDS, ADEL_SPECIALS, ANOMALIES, ANOMALY_COST, MARKER_SLOTS, MARKER_LOC_POOL,
   markerAssignments, turnsFor, energyFor, chipsPerTurn, ENERGY_MAX, MIN_TABLE, MAX_TABLE,
@@ -34,16 +34,29 @@ const crewIds = (G) => Object.keys(G.players);
 const alive = (G) => crewIds(G).filter(p => !G.players[p].dead);
 const isAdel = (pid) => pid === '0';
 
-function spiritCheck(G, random, pid, { fireCheck = false } = {}) {
+// Порог проверки духа вместе с расшифровкой. Считается одним куском, потому
+// что интерфейс обязан показать игроку, из чего порог сложился («дух 3 − 1
+// стресс = 2»), а не готовое число: иначе игрок не понимает, за что бросает.
+function spiritTarget(G, pid, reason) {
   const P = G.players[pid];
-  let spirit = CHARACTERS[P.character].spirit;
-  if (P.inventory.some(it => it.id === 'teddy' && it.faceUp)) spirit += 1;
-  if (G.eventOngoing === 'stress') spirit -= 1;
-  if (fireCheck && G.anomaliesActive.includes('explosions')) spirit -= 2;
-  const roll = random.D6();
-  const ok = roll === 1 || roll <= spirit;
-  log(G, `${CHARACTERS[P.character].name}: проверка духа — d6=${roll} против ${spirit} → ${ok ? 'успех' : 'провал'}`);
-  return ok;
+  const base = CHARACTERS[P.character].spirit;
+  const modifiers = [];
+  if (P.inventory.some(it => it.id === 'teddy' && it.faceUp)) modifiers.push({ key: 'teddy', delta: 1 });
+  if (G.eventOngoing === 'stress') modifiers.push({ key: 'stress', delta: -1 });
+  // «Взрывы» бьют только по проверкам против ран от пожара.
+  if (reason === 'fire' && G.anomaliesActive.includes('explosions')) modifiers.push({ key: 'explosions', delta: -2 });
+  return { base, modifiers, target: base + modifiers.reduce((s, m) => s + m.delta, 0) };
+}
+
+// Поставить проверку духа в очередь. Сам бросок делает игрок ходом rollSpirit:
+// движок нигде не бросает кубик за него молча. Порог считается здесь, при
+// постановке, — пока очередь не пуста, любые действия заблокированы, так что
+// состояние измениться не может, а плашка броска показывает ровно то, чем
+// движок потом посчитает результат.
+function queueCheck(G, pid, reason, context = {}) {
+  const P = G.players[pid];
+  if (!P || P.dead) return;
+  G.pendingChecks.push({ pid, reason, context, ...spiritTarget(G, pid, reason) });
 }
 
 function wound(G, pid, n = 1) {
@@ -51,13 +64,13 @@ function wound(G, pid, n = 1) {
   const ch = CHARACTERS[P.character];
   for (let i = 0; i < n; i++) {
     P.health += 1;
-    log(G, `${ch.name} получает рану (${P.health}/5).`);
+    log(G, `${ch.name} получает рану (${P.health}/${HEALTH_DEATH}).`);
     if (ch.invLoss.includes(P.health) && P.invBlocked < 3) {
       P.invBlocked += 1;
       enforceCapacity(G, pid);
       log(G, `${ch.name}: ячейка инвентаря заблокирована.`);
     }
-    if (P.health >= 5) {
+    if (P.health >= HEALTH_DEATH) {
       P.dead = true;
       G.winner = 'adel';
       log(G, `☠ ${ch.name} погибает. АДЕЛЬ побеждает.`);
@@ -97,34 +110,87 @@ function heal(G, pid, n) {
   const P = G.players[pid];
   P.health = Math.max(0, P.health - n);
   P.invBlocked = 0; // лечение восстанавливает грузоподъёмность
-  log(G, `${CHARACTERS[P.character].name} лечится: раны ${P.health}/5, инвентарь восстановлен.`);
+  log(G, `${CHARACTERS[P.character].name} лечится: раны ${P.health}/${HEALTH_DEATH}, инвентарь восстановлен.`);
 }
 
-function hazardEnter(G, random, pid) {
-  // пожар и гипоксия при входе / начале фазы розыгрыша
+// ---------- опасности при входе: два отдельных шага ----------
+// Пожар и гипоксия разнесены по шагам, потому что пожар может упереться в
+// проверку духа: пока игрок не бросил кубик, гипоксию считать рано (он мог
+// погибнуть), а движение — доигрывать нельзя.
+function stepFire(G, pid) {
   const P = G.players[pid];
-  if (P.inSpace || P.dead) return;
+  if (!P || P.inSpace || P.dead) return;
   const L = loc(G, P.pos);
-  if (L.hazards.fire) {
-    const ext = P.inventory.find(it => it.id === 'extinguisher' && it.faceUp && (it.uses ?? 3) > 0);
-    if (ext && P.enteredThisAction) {
-      ext.uses = (ext.uses ?? 3) - 1;
-      L.hazards.fire = false; G.adel.chipDiscard.push('fire');
-      log(G, `Огнетушитель гасит пожар в локации ${P.pos}.`);
-    } else {
-      if (!spiritCheck(G, random, pid, { fireCheck: true })) wound(G, pid);
-    }
+  if (!L.hazards.fire) return;
+  const ext = P.inventory.find(it => it.id === 'extinguisher' && it.faceUp && (it.uses ?? 3) > 0);
+  if (ext && P.enteredThisAction) {
+    ext.uses = (ext.uses ?? 3) - 1;
+    L.hazards.fire = false; G.adel.chipDiscard.push('fire');
+    log(G, `Огнетушитель гасит пожар в локации ${P.pos}.`);
+    return;
   }
-  if (G.winner) return;
-  if (L.hazards.hypoxia) {
-    // Кубик отдаёт сам игрок (ход payHypoxia). «Неиспользованный кубик» — это
-    // выложенный в планировании, но ещё не потраченный в этот ход. Если таких
-    // нет — по правилам ничего не происходит.
-    if (hasFreeCube(P)) {
-      P.pendingHypoxia = (P.pendingHypoxia || 0) + 1;
-      log(G, `Гипоксия в локации ${P.pos}: ${CHARACTERS[P.character].name} отдаёт кубик действия — выберите какой.`);
-    }
+  queueCheck(G, pid, 'fire', { loc: P.pos });
+}
+
+function stepHypoxia(G, pid) {
+  const P = G.players[pid];
+  if (!P || P.inSpace || P.dead) return;
+  if (!loc(G, P.pos).hazards.hypoxia) return;
+  // Кубик отдаёт сам игрок (ход payHypoxia). «Неиспользованный кубик» — это
+  // выложенный в планировании, но ещё не потраченный в этот ход. Если таких
+  // нет — по правилам ничего не происходит.
+  if (hasFreeCube(P)) {
+    P.pendingHypoxia = (P.pendingHypoxia || 0) + 1;
+    log(G, `Гипоксия в локации ${P.pos}: ${CHARACTERS[P.character].name} отдаёт кубик действия — выберите какой.`);
   }
+}
+
+const hazardSteps = (pid) => [{ t: 'fire', pid }, { t: 'hypoxia', pid }];
+
+// ---------- шаговая машина ----------
+// Всё, что должно случиться ПОСЛЕ проверки духа, оформлено списком шагов
+// G.steps. Замыкания тут не годятся: состояние ходит по сети и сериализуется,
+// поэтому продолжение — это данные, а не функция.
+const STEPS = {
+  fire: (G, random, st) => stepFire(G, st.pid),
+  hypoxia: (G, random, st) => stepHypoxia(G, st.pid),
+  // Хвост движения: сбросить пометку «только что вошёл» и написать в журнал.
+  // Журнальная строка идёт последней, чтобы порядок был как раньше: сперва
+  // сработавшие опасности, потом сам переход.
+  moveDone: (G, random, st) => {
+    const P = G.players[st.pid];
+    if (P) P.enteredThisAction = false;
+    if (!G.winner) log(G, st.msg);
+  },
+  startActions: (G) => {
+    G.phase = 'actions';
+    G.activeCrew = null;
+    log(G, 'Фаза действий: экипаж решает, кто ходит первым.');
+  },
+  afterEvent: (G) => afterEvent(G),
+};
+
+// Крутит шаги, пока не упрётся в проверку духа, не кончится список или не
+// закончится партия. Единственная точка, где движок «продолжает сам».
+function pump(G, random) {
+  while (!G.winner && !G.pendingChecks.length && G.steps.length) {
+    const st = G.steps.shift();
+    STEPS[st.t](G, random, st);
+  }
+  if (G.winner) { G.steps = []; G.pendingChecks = []; }
+}
+
+// Последствия броска. Рана — общий исход трёх причин; рискованное спец.
+// действие доигрывается только при успехе, но кубики за него уже списаны.
+function applyCheckOutcome(G, random, chk, ok) {
+  if (chk.reason === 'risky_special') {
+    const ps = G.pendingSpecial;
+    G.pendingSpecial = null;
+    if (!ok) { log(G, 'Спец. действие сорвалось (провал проверки духа), кубики потрачены.'); return; }
+    if (ps && ps.pid === chk.pid) applySpecial(G, random, ps.pid, ps.payload);
+    return;
+  }
+  if (!ok) wound(G, chk.pid);
 }
 
 function hasFreeCube(P) {
@@ -462,7 +528,9 @@ function runEventPhase(G, random) {
     // «Дрейф» добавляет деление сверх обычного шага конца хода — в сумме
     // на таком ходу точка невозврата уходит на два.
     if (card.id === 'drift') { G.pointOfNoReturn += 1; log(G, `Дрейф: точка невозврата → ${G.pointOfNoReturn}.`); }
-    if (card.id === 'maneuver') for (const p of alive(G)) { if (!spiritCheck(G, random, p)) wound(G, p); if (G.winner) return; }
+    // Проверки не разыгрываются здесь же: они уходят в очередь, и каждый
+    // бросает свой кубик сам. Порядок очереди — порядок игроков за столом.
+    if (card.id === 'maneuver') for (const p of alive(G)) queueCheck(G, p, 'maneuver', { event: card.id });
     if (card.id === 'collision') {
       // Жетонов повреждений в коробке всего четыре: когда все на поле, новое
       // столкновение жетона не добавляет.
@@ -481,7 +549,7 @@ function runEventPhase(G, random) {
   // аномалия «паника» срабатывает даже на отменённом событии
   if (G.anomaliesActive.includes('panic') && card.panic) {
     log(G, 'Аномалия «Паника»: все проходят проверку духа!');
-    for (const p of alive(G)) { if (!spiritCheck(G, random, p)) wound(G, p); if (G.winner) return; }
+    for (const p of alive(G)) queueCheck(G, p, 'panic', { event: card.id });
   }
   G.attackUsedThisTurn = false;
 }
@@ -535,10 +603,9 @@ function startAdelPhase(G, random) {
 function startReveal(G, random) {
   G.phase = 'reveal';
   log(G, 'Фаза розыгрыша: планы раскрыты. Срабатывают опасности.');
-  for (const p of alive(G)) { hazardEnter(G, random, p); if (G.winner) return; }
-  G.phase = 'actions';
-  G.activeCrew = null;
-  log(G, 'Фаза действий: экипаж решает, кто ходит первым.');
+  for (const p of alive(G)) G.steps.push(...hazardSteps(p));
+  G.steps.push({ t: 'startActions' });
+  pump(G, random);
 }
 
 function endTurnPhase(G, random) {
@@ -578,7 +645,10 @@ function endTurnPhase(G, random) {
   if (G.turnNo < 1) { G.winner = 'adel'; log(G, '⏱ Время вышло. АДЕЛЬ побеждает.'); return; }
   runEventPhase(G, random);
   if (G.winner) return;
-  afterEvent(G);
+  // Событие могло поставить проверки духа («Манёвр уклонения», «Паника»):
+  // до планирования фаза не двинется, пока экипаж их не бросит.
+  G.steps.push({ t: 'afterEvent' });
+  pump(G, random);
 }
 
 // Красная миссия закрыта навсегда, если точка невозврата обогнала жетон
@@ -610,6 +680,10 @@ function setup({ ctx, random }) {
     // в playerView из eventDeck[0].
     eventDeck: [], eventDiscard: [], currentEvent: null, eventOngoing: null,
     anomaliesActive: [], attackUsedThisTurn: false,
+    // Очередь проверок духа и её продолжение. lastRoll — последний бросок, по
+    // нему клиенты показывают анимацию кубика; seq растёт, чтобы одинаковые
+    // результаты подряд не слипались в один и тот же «уже показанный».
+    pendingChecks: [], steps: [], lastRoll: null, rollSeq: 0, pendingSpecial: null,
     board: {}, labStack: [...LAB_STACK],
     // Жетонов терминала тревоги два, и чинятся они поштучно: здесь лежат
     // локации тех, что перевёрнуты на красную сторону.
@@ -690,12 +764,217 @@ function setup({ ctx, random }) {
   G.eventDeck = random.Shuffle(deck).map((c, i) => ({ ...c, uid: i, cancelled: false }));
 
   runEventPhase(G, random);
-  afterEvent(G);
+  G.steps.push({ t: 'afterEvent' });
+  pump(G, random);
   return G;
+}
+
+// ---------- специальное действие ----------
+// Эффект специального действия — отдельно от его оплаты кубиками. Вынесен
+// затем, что рискованный вариант доигрывается не сразу: кубики списывает
+// actSpecial, а сам эффект наступает уже после успешного броска в rollSpirit.
+function applySpecial(G, random, playerID, payload) {
+  if (G.winner) return;
+  const P = G.players[playerID];
+  const ch = CHARACTERS[P.character];
+  const kind = payload.kind;
+  const L = P.inSpace ? null : loc(G, P.pos);
+
+  if (kind === 'repairFromSpace') {
+    if (!P.inSpace) return INVALID_MOVE;
+    const near = SPACE_NEAR[P.inSpace] || [];
+    if (!near.includes(payload.loc) || !loc(G, payload.loc).damage) return INVALID_MOVE;
+    loc(G, payload.loc).damage = false;
+    log(G, `${ch.name} снаружи корабля убирает повреждение в локации ${payload.loc}.`);
+    return;
+  }
+  if (kind === 'openHatch') {
+    if (P.inSpace) {
+      const l = payload.loc;
+      if (!HATCHES[l] || !HATCHES[l].includes(P.inSpace) || !loc(G, l).hatchClosed) return INVALID_MOVE;
+      loc(G, l).hatchClosed = false;
+    } else {
+      if (!HATCHES[P.pos] || !L.hatchClosed) return INVALID_MOVE;
+      if (!computerUsable(L)) return INVALID_MOVE;
+      L.hatchClosed = false;
+    }
+    log(G, `${ch.name} открывает люк.`);
+    return;
+  }
+  if (P.inSpace) return INVALID_MOVE;
+
+  if (kind === 'deliver') {
+    const idx = P.inventory.findIndex(x => x.id === payload.itemId);
+    if (idx < 0) return INVALID_MOVE;
+    const item = ITEMS[payload.itemId];
+    if (item.kind !== 'key') return INVALID_MOVE;
+    if (!computerUsable(L)) return INVALID_MOVE;
+    // Удача публична: по правилам игрок показывает предмет и вскрывает
+    // маркер как доказательство. А вот неудача публично не разбирается —
+    // иначе АДЕЛЬ бесплатно узнавала бы, у кого какой ключевой предмет и
+    // какая локация уже проверена. Подробность уходит в личный журнал.
+    const failed = (why) => {
+      log(G, `${ch.name}: специальное действие не удалось.`);
+      logTo(G, playerID, `«${item.name}» в локации ${P.pos}: ${why}`);
+    };
+    if (item.final) {
+      const mission = item.mission;
+      const targetLoc = mission === 'blue' ? BLUE_FINAL_LOC : RED_FINAL_LOC;
+      if (P.pos !== targetLoc) { failed('не та локация для финальной активации'); return; }
+      if (!checkMissionWin(G, mission)) {
+        failed(`условия ${mission === 'blue' ? 'синей' : 'красной'} миссии ещё не выполнены`);
+        return;
+      }
+      G.winner = 'crew';
+      log(G, `🎉 «${item.name}» активирован в локации ${targetLoc}. ЭКИПАЖ ПОБЕЖДАЕТ (${mission === 'blue' ? 'АДЕЛЬ отключена' : 'побег удался'})!`);
+      return;
+    }
+    const marker = markerFor(G, payload.itemId);
+    if (marker.loc === P.pos) {
+      marker.revealed = true;
+      G.missions.delivered[payload.itemId] = true;
+      P.inventory.splice(idx, 1);
+      log(G, `✅ ${ch.name} доставляет «${item.name}» в локацию ${P.pos}! Маркер вскрыт.`);
+    } else {
+      failed('неверная локация, предмет остаётся в инвентаре');
+    }
+    return;
+  }
+
+  if (kind === 'clearHazard') {
+    // через компьютер: шпионаж/гипоксия/тьма в своей или соседней (через проём) локации
+    if (!computerUsable(L)) return INVALID_MOVE;
+    const t = payload.hazard, tl = payload.loc;
+    if (!['spy', 'hypoxia', 'darkness'].includes(t)) return INVALID_MOVE;
+    const okLoc = tl === P.pos || ADJ[P.pos].includes(tl);
+    if (!okLoc || !loc(G, tl).hazards[t]) return INVALID_MOVE;
+    loc(G, tl).hazards[t] = false;
+    G.adel.chipDiscard.push(t);
+    log(G, `${ch.name} через компьютер убирает «${HAZARD_NAMES[t]}» из локации ${tl}.`);
+    return;
+  }
+
+  if (kind === 'terminal') {
+    const term = TERMINALS[P.pos];
+    const isAlarm = G.alarmTerminals.includes(P.pos);
+    if (payload.alarm && isAlarm) {
+      // терминал тревоги лежит на компьютере локации — зависит от компьютера
+      if (G.alarmOff.includes(P.pos) || !computerUsable(L)) return INVALID_MOVE;
+      if (!G.eventDeck.length) return INVALID_MOVE;
+      G.eventDeck[0].cancelled = true;
+      // переместить терминал тревоги
+      let nl; let guard = 0;
+      do { nl = random.Die(20); guard++; } while (G.alarmTerminals.includes(nl) && guard < 50);
+      G.alarmTerminals = G.alarmTerminals.map(x => (x === P.pos ? nl : x));
+      G.alarmOff = G.alarmOff.map(x => (x === P.pos ? nl : x));
+      log(G, `${ch.name} активирует терминал тревоги: следующее событие отменено. Терминал переносится в локацию ${nl}.`);
+      return;
+    }
+    if (!term || !terminalUsable(L)) return INVALID_MOVE;
+    switch (term) {
+      case 'medical': {
+        const t = payload.targetPid ?? playerID;
+        const T = G.players[t];
+        if (!T || (t !== playerID && (T.pos !== P.pos || T.inSpace))) return INVALID_MOVE;
+        heal(G, t, HEALTH_DEATH);
+        break;
+      }
+      case 'command':
+        G.pointOfNoReturn = Math.max(1, G.pointOfNoReturn - 1);
+        log(G, `Точка невозврата → ${G.pointOfNoReturn}.`);
+        break;
+      case 'repair': {
+        const dl = payload.loc;
+        if (!loc(G, dl)?.damage) return INVALID_MOVE;
+        loc(G, dl).damage = false;
+        log(G, `${ch.name} чинит повреждение в локации ${dl}.`);
+        break;
+      }
+      case 'central': {
+        if (payload.fixAlarm) {
+          // Центральный терминал чинит ОДИН жетон: по правилам он снимает
+          // одну «блокировку», а жетонов тревоги на корабле два.
+          const fix = G.alarmOff.includes(payload.loc) ? payload.loc : G.alarmOff[0];
+          if (fix == null) return INVALID_MOVE;
+          G.alarmOff = G.alarmOff.filter(l => l !== fix);
+          log(G, `${ch.name} восстанавливает терминал тревоги в локации ${fix}.`);
+          break;
+        }
+        const dl = payload.loc;
+        const DL = loc(G, dl);
+        if (!DL || (!DL.computerLocked && !DL.terminalLocked)) return INVALID_MOVE;
+        if (payload.slot === 'terminal' && DL.terminalLocked) DL.terminalLocked = false;
+        else if (DL.computerLocked) DL.computerLocked = false;
+        else DL.terminalLocked = false;
+        G.adel.chipDiscard.push('lockdown');
+        log(G, `${ch.name} перезагружает системы в локации ${dl}.`);
+        break;
+      }
+      case 'engineering': {
+        if (!G.labStack.length) return INVALID_MOVE;
+        P.pendingLabPick = true;
+        log(G, `${ch.name} использует инженерный терминал.`);
+        break;
+      }
+      case 'delivery': {
+        const t = payload.targetPid;
+        const T = G.players[t];
+        if (!T || T.dead || T.inSpace) return INVALID_MOVE;
+        const idx = payload.invIndex | 0;
+        if (payload.direction === 'take') {
+          if (!payload.consented) return INVALID_MOVE; // согласие подтверждает второй игрок в чате
+          const it2 = T.inventory[idx]; if (!it2) return INVALID_MOVE;
+          T.inventory.splice(idx, 1); P.inventory.push(it2); enforceCapacity(G, playerID);
+        } else {
+          const it2 = P.inventory[idx]; if (!it2) return INVALID_MOVE;
+          P.inventory.splice(idx, 1); T.inventory.push(it2); enforceCapacity(G, t);
+        }
+        log(G, `${ch.name} использует терминал доставки: предмет телепортирован.`);
+        break;
+      }
+      default: return INVALID_MOVE;
+    }
+    return;
+  }
+  return INVALID_MOVE;
+}
+
+// Пробный прогон спец. действия на копии состояния. Нужен ровно затем, чтобы
+// отличить «ход незаконен» от «ход законен, но проверка духа может провалиться»:
+// первое отклоняется сразу, второе уходит в очередь бросков. Копия
+// выбрасывается — на настоящем состоянии не меняется ничего.
+const PROBE_RANDOM = { D6: () => 1, Die: () => 1, Number: () => 0, Shuffle: (a) => [...a] };
+function probeSpecial(G, pid, payload) {
+  return applySpecial(JSON.parse(JSON.stringify(G)), PROBE_RANDOM, pid, payload);
 }
 
 // ---------- moves ----------
 const moves = {
+  // === ПРОВЕРКА ДУХА ===
+  // Бросок — отдельное обязательное действие того игрока, чья проверка первая
+  // в очереди. Кубик бросает сервер, результат ложится в G.lastRoll и виден
+  // всем: клиенты по нему рисуют анимацию, но исход уже разыгран здесь — так
+  // анимация не может разойтись с состоянием.
+  rollSpirit: ({ G, playerID, random }) => {
+    const chk = G.pendingChecks[0];
+    if (!chk || chk.pid !== playerID) return INVALID_MOVE;
+    const P = G.players[playerID];
+    const die = random.D6();
+    // Единица проходит всегда — правило проверки духа.
+    const ok = die === 1 || die <= chk.target;
+    G.pendingChecks.shift();
+    G.rollSeq += 1;
+    G.lastRoll = {
+      pid: playerID, reason: chk.reason, context: chk.context,
+      base: chk.base, modifiers: chk.modifiers,
+      die, target: chk.target, ok, seq: G.rollSeq,
+    };
+    log(G, `${CHARACTERS[P.character].name} против «${SPIRIT_REASONS[chk.reason]}»: `
+      + `d6=${die} против ${chk.target} → ${ok ? 'успех' : 'провал'}`);
+    applyCheckOutcome(G, random, chk, ok);
+    pump(G, random);
+  },
+
   // === ЭКИПАЖ: планирование ===
   commitPlan: ({ G, playerID, random }, plan) => {
     if (G.phase !== 'planning' || isAdel(playerID) || G.players[playerID]?.dead) return INVALID_MOVE;
@@ -896,8 +1175,11 @@ const moves = {
         spendCubes(G, playerID, 'move', 1, 0);
         P.inSpace = null; P.pos = dest; P.enteredThisAction = true;
         clearShares(G, playerID);
-        hazardEnter(G, random, playerID); P.enteredThisAction = false;
-        log(G, `${CHARACTERS[P.character].name} возвращается на корабль в локацию ${dest}.`);
+        G.steps.push(...hazardSteps(playerID), {
+          t: 'moveDone', pid: playerID,
+          msg: `${CHARACTERS[P.character].name} возвращается на корабль в локацию ${dest}.`,
+        });
+        pump(G, random);
       }
       return;
     }
@@ -918,9 +1200,13 @@ const moves = {
     P.pos = dest; P.enteredThisAction = true;
     P.pendingTake = null;   // ушли — предложение взять предмет пропало
     clearShares(G, playerID);
-    hazardEnter(G, random, playerID);
-    P.enteredThisAction = false;
-    if (!G.winner) log(G, `${CHARACTERS[P.character].name} переходит в локацию ${dest}.`);
+    // Вход в локацию с пожаром прерывает движение: сперва бросок, потом хвост
+    // (гипоксия и запись в журнал). Без пожара всё доигрывается тут же.
+    G.steps.push(...hazardSteps(playerID), {
+      t: 'moveDone', pid: playerID,
+      msg: `${CHARACTERS[P.character].name} переходит в локацию ${dest}.`,
+    });
+    pump(G, random);
   },
 
   actSearch: ({ G, playerID }, take) => {
@@ -1093,170 +1379,20 @@ const moves = {
     if (ch.special === 'cheap_special') { cost = 2; }
     else if (payload.risky) { cost = 2; needCheck = true; }
     if (!canSpend(G, playerID, 'special', cost, tax)) return INVALID_MOVE;
+    // Законность самого действия проверяем ДО списания кубиков и постановки
+    // броска. Иначе rollSpirit пришлось бы отклонять уже после броска, а
+    // отклонённый ход boardgame.io откатывает целиком — игрок остался бы
+    // с непройденной проверкой и бросал бы её заново до бесконечности.
+    if (needCheck && probeSpecial(G, playerID, payload) === INVALID_MOVE) return INVALID_MOVE;
     if (!spendCubes(G, playerID, 'special', cost, tax)) return INVALID_MOVE;
-    if (needCheck && !spiritCheck(G, random, playerID)) { log(G, 'Спец. действие сорвалось (провал проверки духа), кубики потрачены.'); return; }
-    if (G.winner) return;
-
-    const kind = payload.kind;
-    const L = P.inSpace ? null : loc(G, P.pos);
-
-    if (kind === 'repairFromSpace') {
-      if (!P.inSpace) return INVALID_MOVE;
-      const near = SPACE_NEAR[P.inSpace] || [];
-      if (!near.includes(payload.loc) || !loc(G, payload.loc).damage) return INVALID_MOVE;
-      loc(G, payload.loc).damage = false;
-      log(G, `${ch.name} снаружи корабля убирает повреждение в локации ${payload.loc}.`);
+    if (needCheck) {
+      // Рискованный вариант — два шага: кубики уже потрачены, а эффект
+      // наступит только после успешного броска (ход rollSpirit).
+      G.pendingSpecial = { pid: playerID, payload };
+      queueCheck(G, playerID, 'risky_special', {});
       return;
     }
-    if (kind === 'openHatch') {
-      if (P.inSpace) {
-        const l = payload.loc;
-        if (!HATCHES[l] || !HATCHES[l].includes(P.inSpace) || !loc(G, l).hatchClosed) return INVALID_MOVE;
-        loc(G, l).hatchClosed = false;
-      } else {
-        if (!HATCHES[P.pos] || !L.hatchClosed) return INVALID_MOVE;
-        if (!computerUsable(L)) return INVALID_MOVE;
-        L.hatchClosed = false;
-      }
-      log(G, `${ch.name} открывает люк.`);
-      return;
-    }
-    if (P.inSpace) return INVALID_MOVE;
-
-    if (kind === 'deliver') {
-      const idx = P.inventory.findIndex(x => x.id === payload.itemId);
-      if (idx < 0) return INVALID_MOVE;
-      const item = ITEMS[payload.itemId];
-      if (item.kind !== 'key') return INVALID_MOVE;
-      if (!computerUsable(L)) return INVALID_MOVE;
-      // Удача публична: по правилам игрок показывает предмет и вскрывает
-      // маркер как доказательство. А вот неудача публично не разбирается —
-      // иначе АДЕЛЬ бесплатно узнавала бы, у кого какой ключевой предмет и
-      // какая локация уже проверена. Подробность уходит в личный журнал.
-      const failed = (why) => {
-        log(G, `${ch.name}: специальное действие не удалось.`);
-        logTo(G, playerID, `«${item.name}» в локации ${P.pos}: ${why}`);
-      };
-      if (item.final) {
-        const mission = item.mission;
-        const targetLoc = mission === 'blue' ? BLUE_FINAL_LOC : RED_FINAL_LOC;
-        if (P.pos !== targetLoc) { failed('не та локация для финальной активации'); return; }
-        if (!checkMissionWin(G, mission)) {
-          failed(`условия ${mission === 'blue' ? 'синей' : 'красной'} миссии ещё не выполнены`);
-          return;
-        }
-        G.winner = 'crew';
-        log(G, `🎉 «${item.name}» активирован в локации ${targetLoc}. ЭКИПАЖ ПОБЕЖДАЕТ (${mission === 'blue' ? 'АДЕЛЬ отключена' : 'побег удался'})!`);
-        return;
-      }
-      const marker = markerFor(G, payload.itemId);
-      if (marker.loc === P.pos) {
-        marker.revealed = true;
-        G.missions.delivered[payload.itemId] = true;
-        P.inventory.splice(idx, 1);
-        log(G, `✅ ${ch.name} доставляет «${item.name}» в локацию ${P.pos}! Маркер вскрыт.`);
-      } else {
-        failed('неверная локация, предмет остаётся в инвентаре');
-      }
-      return;
-    }
-
-    if (kind === 'clearHazard') {
-      // через компьютер: шпионаж/гипоксия/тьма в своей или соседней (через проём) локации
-      if (!computerUsable(L)) return INVALID_MOVE;
-      const t = payload.hazard, tl = payload.loc;
-      if (!['spy', 'hypoxia', 'darkness'].includes(t)) return INVALID_MOVE;
-      const okLoc = tl === P.pos || ADJ[P.pos].includes(tl);
-      if (!okLoc || !loc(G, tl).hazards[t]) return INVALID_MOVE;
-      loc(G, tl).hazards[t] = false;
-      G.adel.chipDiscard.push(t);
-      log(G, `${ch.name} через компьютер убирает «${HAZARD_NAMES[t]}» из локации ${tl}.`);
-      return;
-    }
-
-    if (kind === 'terminal') {
-      const term = TERMINALS[P.pos];
-      const isAlarm = G.alarmTerminals.includes(P.pos);
-      if (payload.alarm && isAlarm) {
-        // терминал тревоги лежит на компьютере локации — зависит от компьютера
-        if (G.alarmOff.includes(P.pos) || !computerUsable(L)) return INVALID_MOVE;
-        if (!G.eventDeck.length) return INVALID_MOVE;
-        G.eventDeck[0].cancelled = true;
-        // переместить терминал тревоги
-        let nl; let guard = 0;
-        do { nl = random.Die(20); guard++; } while (G.alarmTerminals.includes(nl) && guard < 50);
-        G.alarmTerminals = G.alarmTerminals.map(x => (x === P.pos ? nl : x));
-        G.alarmOff = G.alarmOff.map(x => (x === P.pos ? nl : x));
-        log(G, `${ch.name} активирует терминал тревоги: следующее событие отменено. Терминал переносится в локацию ${nl}.`);
-        return;
-      }
-      if (!term || !terminalUsable(L)) return INVALID_MOVE;
-      switch (term) {
-        case 'medical': {
-          const t = payload.targetPid ?? playerID;
-          const T = G.players[t];
-          if (!T || (t !== playerID && (T.pos !== P.pos || T.inSpace))) return INVALID_MOVE;
-          heal(G, t, 5);
-          break;
-        }
-        case 'command':
-          G.pointOfNoReturn = Math.max(1, G.pointOfNoReturn - 1);
-          log(G, `Точка невозврата → ${G.pointOfNoReturn}.`);
-          break;
-        case 'repair': {
-          const dl = payload.loc;
-          if (!loc(G, dl)?.damage) return INVALID_MOVE;
-          loc(G, dl).damage = false;
-          log(G, `${ch.name} чинит повреждение в локации ${dl}.`);
-          break;
-        }
-        case 'central': {
-          if (payload.fixAlarm) {
-            // Центральный терминал чинит ОДИН жетон: по правилам он снимает
-            // одну «блокировку», а жетонов тревоги на корабле два.
-            const fix = G.alarmOff.includes(payload.loc) ? payload.loc : G.alarmOff[0];
-            if (fix == null) return INVALID_MOVE;
-            G.alarmOff = G.alarmOff.filter(l => l !== fix);
-            log(G, `${ch.name} восстанавливает терминал тревоги в локации ${fix}.`);
-            break;
-          }
-          const dl = payload.loc;
-          const DL = loc(G, dl);
-          if (!DL || (!DL.computerLocked && !DL.terminalLocked)) return INVALID_MOVE;
-          if (payload.slot === 'terminal' && DL.terminalLocked) DL.terminalLocked = false;
-          else if (DL.computerLocked) DL.computerLocked = false;
-          else DL.terminalLocked = false;
-          G.adel.chipDiscard.push('lockdown');
-          log(G, `${ch.name} перезагружает системы в локации ${dl}.`);
-          break;
-        }
-        case 'engineering': {
-          if (!G.labStack.length) return INVALID_MOVE;
-          P.pendingLabPick = true;
-          log(G, `${ch.name} использует инженерный терминал.`);
-          break;
-        }
-        case 'delivery': {
-          const t = payload.targetPid;
-          const T = G.players[t];
-          if (!T || T.dead || T.inSpace) return INVALID_MOVE;
-          const idx = payload.invIndex | 0;
-          if (payload.direction === 'take') {
-            if (!payload.consented) return INVALID_MOVE; // согласие подтверждает второй игрок в чате
-            const it2 = T.inventory[idx]; if (!it2) return INVALID_MOVE;
-            T.inventory.splice(idx, 1); P.inventory.push(it2); enforceCapacity(G, playerID);
-          } else {
-            const it2 = P.inventory[idx]; if (!it2) return INVALID_MOVE;
-            P.inventory.splice(idx, 1); T.inventory.push(it2); enforceCapacity(G, t);
-          }
-          log(G, `${ch.name} использует терминал доставки: предмет телепортирован.`);
-          break;
-        }
-        default: return INVALID_MOVE;
-      }
-      return;
-    }
-    return INVALID_MOVE;
+    return applySpecial(G, random, playerID, payload);
   },
 
   // батарея: убрать блокировку в своей локации (одноразовое применение заряда предмета)
@@ -1326,6 +1462,31 @@ const moves = {
   },
 };
 
+// Пока очередь проверок духа не пуста, игра стоит: единственный законный ход —
+// rollSpirit того, чья проверка первая. Иначе бросок можно было бы обойти —
+// доиграть ход, а последствия проверки получить задним числом, уже зная,
+// что вышло. Обёртка общая для всех ходов, чтобы про неё нельзя было забыть
+// при добавлении нового.
+// Партии, сохранённые до появления очереди проверок, приходят с диска без её
+// полей. Без этого первый же ход падал на `pendingChecks.length` — и партия
+// выглядела мёртвой без единого объяснения: кнопки нажимаются, ничего не
+// происходит. Пустая очередь — правильное начальное значение для такой партии.
+function ensureQueue(G) {
+  if (!Array.isArray(G.pendingChecks)) G.pendingChecks = [];
+  if (!Array.isArray(G.steps)) G.steps = [];
+  if (typeof G.rollSeq !== 'number') G.rollSeq = 0;
+  if (G.lastRoll === undefined) G.lastRoll = null;
+  if (G.pendingSpecial === undefined) G.pendingSpecial = null;
+}
+
+function gated(name, f) {
+  return (ctx, ...args) => {
+    ensureQueue(ctx.G);
+    if (name !== 'rollSpirit' && ctx.G.pendingChecks.length) return INVALID_MOVE;
+    return f(ctx, ...args);
+  };
+}
+
 // ---------- playerView: скрытая информация ----------
 // Фазы, в которых ширмы уже открыты и планы экипажа видны всем.
 const PLANS_OPEN_PHASES = ['reveal', 'actions', 'endturn'];
@@ -1338,6 +1499,15 @@ function playerView({ G, playerID }) {
   // Личный журнал — только свой. Иначе через него утекало бы ровно то, ради
   // сокрытия чего он и заведён.
   V.privateLog = me && G.privateLog[me] ? [...G.privateLog[me]] : [];
+
+  // Отложенное рискованное спец. действие: то, что игрок собрался сделать, —
+  // его тайна ровно до тех пор, пока действие не удалось. Неудачная доставка
+  // публично не разбирается (иначе АДЕЛЬ узнала бы предмет и локацию), поэтому
+  // payload не должен утечь и через паузу на бросок. Сама очередь проверок
+  // открыта всем — видно, чей бросок, но не подо что.
+  if (G.pendingSpecial && G.pendingSpecial.pid !== me) {
+    V.pendingSpecial = { pid: G.pendingSpecial.pid };
+  }
 
   // предметы на поле: скрыты; видны — вскрытые, известные игроку, шпионаж для АДЕЛЬ
   for (let l = 1; l <= 20; l++) {
@@ -1381,14 +1551,20 @@ function playerView({ G, playerID }) {
     if (!m.revealed && !(viewers.includes(me) || sharedToMe)) m.loc = null;
   }
 
-  // АДЕЛЬ: рука, колода, мешочек, заметки шпионажа, аномалии лицом вниз
+  // АДЕЛЬ: что от экипажа закрыто, а что нет.
+  //
+  // Рука и жетоны аномалий ОТКРЫТЫ — решение владельца коробки: экипаж видит
+  // их так же, как сама АДЕЛЬ. Раньше и то, и другое пряталось; менять
+  // обратно — снимать эти две строки.
+  //
+  // Закрытым остаётся то, что даёт знание наперёд: порядок колоды (иначе обе
+  // стороны планируют на много ходов вперёд), состав сброса, состав мешочка и
+  // заметки шпионажа — в последних лежат подсмотренные локации маркеров.
   if (!adel) {
-    V.adel.hand = G.adel.hand.map(() => ({ id: 'hidden' }));
     V.adel.deck = G.adel.deck.length;
     V.adel.discard = G.adel.discard.length;
     V.adel.bag = Object.values(G.adel.bag).reduce((a, b) => a + b, 0);
     V.adel.spyNotes = [];
-    V.adel.anomalies = G.adel.anomalies.map(a => (G.anomaliesActive.includes(a) ? a : 'hidden'));
   } else {
     V.adel.deck = G.adel.deck.length;
   }
@@ -1417,6 +1593,46 @@ export const __testing = { consoleAddChip, consoleTopCost, consoleTakeChip };
 // потом проверит движок. Иначе интерфейс предлагает то, что будет отклонено.
 export { hazardCardRules, consoleFree };
 
+// Во что обойдётся спец. действие: своя цена, доплата за тьму и «вредоносную
+// программу», хватает ли кубиков. Открыто интерфейсу по той же причине, что и
+// правила карт: он обязан считать доступность тем же кодом, что и движок.
+// Без этого кнопка нажимается, ход молча отклоняется, и игрок не понимает,
+// чего ему не хватило.
+export function specialPlan(G, pid, { risky = false } = {}) {
+  const P = G.players[pid];
+  if (!P || !P.plan) return { cost: 0, tax: 0, need: 0, have: 0, can: false };
+  const ch = CHARACTERS[P.character];
+  const tax = (P.inSpace ? 0 : darknessTax(G, pid)) + (G.eventOngoing === 'malware' ? 1 : 0);
+  const cost = ch.special === 'cheap_special' ? 2 : (risky ? 2 : 3);
+  const free = (k) => P.plan[k] - P.plan.spent[k];
+  return {
+    cost, tax, need: cost + tax,
+    have: CUBE_ACTIONS.reduce((s, k) => s + free(k), 0) + P.bonusCubes,
+    can: canSpend(G, pid, 'special', cost, tax),
+  };
+}
+
+// Куда можно убрать фишку через компьютер: своя локация и соседние через
+// проём, и только те, где эта фишка есть. Пустой список — действие невозможно,
+// и интерфейс обязан это показать, а не предлагать заведомо отклоняемый ход.
+export function clearHazardTargets(G, pid, hazard) {
+  const P = G.players[pid];
+  if (!P || P.inSpace || P.dead) return [];
+  
+  if (!computerUsable(loc(G, P.pos))) return [];   // действие идёт через компьютер
+  return [P.pos, ...ADJ[P.pos]].filter(l => loc(G, l).hazards[hazard]);
+}
+
+// Почему компьютер недоступен — словами, для подсказки в интерфейсе.
+export function computerBlockedWhy(G, pid) {
+  const P = G.players[pid];
+  if (!P || P.inSpace) return 'вы в открытом космосе';
+  const L = loc(G, P.pos);
+  if (L.damage) return 'в локации жетон повреждения';
+  if (L.computerLocked) return 'компьютер заблокирован';
+  return null;
+}
+
 export const Adel = {
   name: 'adel',
   minPlayers: MIN_TABLE,
@@ -1429,7 +1645,7 @@ export const Adel = {
   // redact: true — аргументы хода вырезаются из журнала, который boardgame.io
   // рассылает остальным клиентам. Без этого playerView бесполезен: АДЕЛЬ
   // читала бы планы экипажа прямо из лога commitPlan.
-  moves: Object.fromEntries(Object.entries(moves).map(([k, f]) => [k, { move: f, client: false, redact: true }])),
+  moves: Object.fromEntries(Object.entries(moves).map(([k, f]) => [k, { move: gated(k, f), client: false, redact: true }])),
   endIf: ({ G }) => (G.winner ? { winner: G.winner } : undefined),
   disableUndo: true,
 };

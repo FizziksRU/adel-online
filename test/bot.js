@@ -177,9 +177,23 @@ function meet(G, pid, S) {
   }
 }
 
+// Проверка духа — отдельное обязательное действие: пока очередь не разобрана,
+// движок стоит и любой другой ход отклоняется. Живой игрок жмёт «Бросить
+// кубик», бот делает ровно то же. Без этого любой отыгрыш зависает на первом
+// же пожаре — что и есть смысл блокировки.
+export function answerChecks(G, random, limit = 40) {
+  let n = 0;
+  while (G.pendingChecks.length && !G.winner && n < limit) {
+    mv('rollSpirit')({ G, playerID: G.pendingChecks[0].pid, random });
+    n += 1;
+  }
+  return n;
+}
+
 // Разбор зависших требований — то же, что делает живой игрок перед действием.
 function settle(G, pid, random) {
   const P = G.players[pid];
+  answerChecks(G, random);
   for (let guard = 0; guard < 12; guard++) {
     if (P.pendingHypoxia) {
       const k = ['door', 'activate', 'special', 'search', 'move'].find(a => free(P, a) > 0);
@@ -246,7 +260,10 @@ export function act(G, pid, S, random) {
     if (freeAll(P) < 1) break;
     const r = mv('actMove')({ G, playerID: pid, random }, path[0]);
     if (r === 'INVALID_MOVE') break;
+    // Вошли в локацию с пожаром — движение прервано до броска.
+    answerChecks(G, random);
   }
+  answerChecks(G, random);
   meet(G, pid, S);
 }
 

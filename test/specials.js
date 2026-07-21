@@ -369,20 +369,35 @@ const play = (G, cardId, payload, random = makeRandom()) =>
   }
 }
 {
-  // Специальные карты лежат в общей руке — экипаж не должен видеть, какие
-  // именно карты у АДЕЛЬ и что лежит в её сбросе.
+  // Специальные карты лежат в общей руке. Рука АДЕЛЬ открыта экипажу — так
+  // решил владелец коробки, — а вот сброс и порядок колоды закрыты: иначе обе
+  // стороны знали бы ход событий наперёд.
   const G = Adel.setup({ ctx: { numPlayers: 4 }, random: makeRandom() });
   G.adel.hand = [spec('S_reshuffle'), spec('S_energy')];
   G.adel.discard = [spec('S_recall')];
   const crew = Adel.playerView({ G, playerID: '1' });
-  assert(crew.adel.hand.every(c => c.id === 'hidden'),
-    'экипаж не видит специальных карт в руке АДЕЛЬ');
+  assert(crew.adel.hand.map(c => c.id).join(',') === 'S_reshuffle,S_energy',
+    'экипаж видит специальные карты в руке АДЕЛЬ поимённо');
+  assert(crew.adel.hand.every(c => c.name && c.text),
+    'и с названием и текстом — иначе по карте ничего не понять');
   assert(typeof crew.adel.discard === 'number', 'состав сброса АДЕЛЬ скрыт от экипажа');
+  assert(typeof crew.adel.deck === 'number', 'порядок колоды АДЕЛЬ тоже закрыт');
   assert(crew.adel.specials === undefined, 'отдельной выкладки специальных карт нет и в виде');
 
   const own = Adel.playerView({ G, playerID: '0' });
   assert(own.adel.hand.some(c => c.id === 'S_reshuffle'), 'свою руку АДЕЛЬ видит');
   assert(own.adel.discard.some(c => c.id === 'S_recall'), 'свой сброс АДЕЛЬ видит');
+}
+{
+  // Жетоны аномалий тоже открыты: экипаж видит их так же, как сама АДЕЛЬ.
+  const G = Adel.setup({ ctx: { numPlayers: 4 }, random: makeRandom() });
+  G.anomaliesActive = [G.adel.anomalies[0]];
+  const crew = Adel.playerView({ G, playerID: '1' });
+  assert(crew.adel.anomalies.join(',') === G.adel.anomalies.join(','),
+    'экипаж видит все четыре жетона аномалий поимённо, а не рубашкой');
+  assert(!crew.adel.anomalies.includes('hidden'), 'закрытых жетонов в виде экипажа не осталось');
+  const spectator = Adel.playerView({ G, playerID: '9' });
+  assert(spectator.adel.anomalies.join(',') === G.adel.anomalies.join(','), 'и зритель видит их же');
 }
 {
   // Следующее событие выводится из колоды, а не хранится копией: правка
