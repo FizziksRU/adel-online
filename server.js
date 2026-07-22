@@ -24,6 +24,14 @@ const db = new FlatFile({ dir: dbDir, logging: false });
 
 const server = Server({ games: [Adel], origins, db });
 
+// Health-check для хостинга: платформа проверяет живость приложения запросом на
+// лёгкий эндпоинт. Он отвечает 200 сразу и не трогает базу — иначе деплой висит,
+// не понимая, что контейнер поднялся. Стоит до статики, чтобы ответ был быстрым.
+server.app.use(async (ctx, next) => {
+  if (ctx.path === '/health') { ctx.status = 200; ctx.body = 'ok'; return; }
+  await next();
+});
+
 server.app.use(serve(path.join(__dirname, 'dist')));
 
 server.run(PORT, () => {
