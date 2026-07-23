@@ -120,11 +120,12 @@ for (const [client, pid] of [[c2, '2'], [c3, '3']]) {
 assert(G().turnNo === 14 || G().winner, 'ход перещёлкнулся: ' + G().turnNo + ' winner=' + G().winner);
 assert(G().phase === 'planning' || G().winner, 'новый ход — планирование');
 
-// скрытая информация: экипаж не видит руку АДЕЛЬ
+// скрытая информация: экипаж НЕ видит руку АДЕЛЬ (решение владельца).
+// Через настоящий boardgame.io — тот же канал, что тёк на проде. Виден только
+// счёт карт, сами карты — рубашки. Тест падает при откате фикса в playerView.
 const v1 = c1.getState().G;
-// Рука АДЕЛЬ открыта экипажу — решение владельца коробки.
-assert(v1.adel.hand.length === G().adel.hand.length && v1.adel.hand.every(c => c.id !== 'hidden'),
-  'экипаж видит карты в руке АДЕЛЬ');
+assert(v1.adel.hand.length === G().adel.hand.length && v1.adel.hand.every(c => c.id === 'hidden'),
+  'рука АДЕЛЬ закрыта от экипажа: виден счёт, но не карты');
 assert(typeof v1.adel.deck === 'number', 'порядок колоды АДЕЛЬ при этом закрыт');
 assert(typeof v1.adel.bag === 'number', 'состав мешочка скрыт');
 const hiddenMarkers = Object.values(v1.missions.markers).filter(m => m.loc === null).length;

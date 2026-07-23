@@ -8,11 +8,12 @@
 import React from 'react';
 import { renderToString } from 'react-dom/server';
 import { createServer } from 'vite';
-import { Adel } from '../src/game/index.js';
+import { Adel, actionCost } from '../src/game/index.js';
 import {
   ADEL_SPECIALS, HAZARDS, SECTORS, SECTOR_NAMES, SPACE_ADJ, SPACE_NAMES, CHARACTERS,
   HAZARD_NAMES, HAZARD_ICON, CONSOLE_COSTS, CONSOLE_LAYOUT, ANOMALIES, ANOMALY_COST,
   ENERGY_MAX, ADEL_HAND_LIMIT, HEALTH_DEATH, chipsPerTurn, energyFor,
+  ITEMS, ITEM_EFFECTS, MARKER_SLOTS,
 } from '../src/game/data.js';
 
 let failed = 0;
@@ -47,13 +48,14 @@ const { AdelCardPicker } = await vite.ssrLoadModule('/src/client/AdelCards.jsx')
 const { RollOverlay, rollShowPlan, SPIN_MS, ROLL_HOLD_MS } = await vite.ssrLoadModule('/src/client/SpiritRoll.jsx');
 const { HealthTrack } = await vite.ssrLoadModule('/src/client/Health.jsx');
 const { AdelConsole } = await vite.ssrLoadModule('/src/client/Console.jsx');
+const { ItemCard } = await vite.ssrLoadModule('/src/client/ItemCard.jsx');
 
 // React разделяет соседние текстовые узлы комментариями <!-- -->, из-за чего
 // «Локация {l}» приезжает как «Локация <!-- -->4». Для проверок это шум.
 const strip = (html) => html.split('<!-- -->').join('');
 
-const render = (G, playerID) =>
-  strip(renderToString(React.createElement(Board, { G, ctx: {}, moves: movesStub, playerID })));
+const render = (G, playerID, matchData) =>
+  strip(renderToString(React.createElement(Board, { G, ctx: {}, moves: movesStub, playerID, matchData })));
 const viewFor = (G, pid) => Adel.playerView({ G, playerID: pid });
 
 // Кнопка с заданной подписью целиком — чтобы проверять именно её атрибуты,
@@ -77,6 +79,15 @@ const allButtons = (html) => {
 };
 const textOf = (frag) => frag.replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
 const buttonByText = (html, text) => allButtons(html).find(b => textOf(b) === text.trim()) || null;
+// Кнопка, содержащая подстроку: подписи действий теперь несут ценник («2⬛»)
+// после текста, поэтому точное совпадение всей подписи уже не годится.
+const btnContaining = (html, sub) => {
+  const i = html.indexOf(sub);
+  if (i < 0) return null;
+  const j = html.lastIndexOf('<button', i);
+  const k = html.indexOf('</button>', i);
+  return (j < 0 || k < 0) ? null : html.slice(j, k + 9);
+};
 
 const baseG = () => {
   const G = Adel.setup({ ctx: { numPlayers: 4 }, random: makeRandom() });
@@ -119,20 +130,20 @@ const baseG = () => {
   assert(btn && btn.includes('disabled'), 'вне фазы АДЕЛЬ кнопка карты заблокирована');
 }
 
-// --- вид экипажа: рука АДЕЛЬ открыта, но нажимать в ней нечего ---
+// --- вид экипажа: рука АДЕЛЬ ЗАКРЫТА — виден счёт и рубашки, не карты ---
 {
   const G = baseG();
   G.phase = 'planning';
   G.adel.hand = ADEL_SPECIALS.map(c => ({ ...c }));
-  const html = render(viewFor(G, '1'), '1');
+  const html = render(viewFor(G, '1'), '1');   // viewFor применяет playerView
   assert(html.includes('Планирование'), 'экипажу показана панель планирования');
-  assert(html.includes('Рука АДЕЛЬ'), 'рука АДЕЛЬ подписана экипажу');
+  assert(html.includes('Рука АДЕЛЬ'), 'рука АДЕЛЬ подписана экипажу (со счётом)');
   for (const c of ADEL_SPECIALS) {
-    assert(html.includes(c.name), `экипаж видит название карты «${c.name}»`);
-    // Карта показана, но не кнопкой: сыграть её может только сама АДЕЛЬ.
+    assert(!html.includes(c.name), `экипаж НЕ видит название карты «${c.name}»`);
     assert(!buttonWith(html, `★ ${c.name}`), `карта «${c.name}» экипажу не кликабельна`);
   }
   assert(html.includes('handcard'), 'карты руки нарисованы как список, а не как пульт');
+  assert(html.includes('закрытая карта'), 'карты руки показаны рубашкой, а не поимённо');
   assert(!html.includes('Завершить фазу АДЕЛЬ'), 'кнопок фазы АДЕЛЬ у экипажа нет');
   // Ищем именно заголовок раздела: слово «Шпионаж» есть и в подсказках ячеек
   // консоли, поэтому поиск по всей странице был бы бутафорским.
@@ -147,6 +158,114 @@ const baseG = () => {
     'колода и сброс АДЕЛЬ приходят экипажу числами, а не составом');
 }
 
+// --- B7: шпионаж — АДЕЛЬ видит предметы локации и инвентарь попавшего игрока ---
+{
+  const G = baseG();
+  G.phase = 'actions';
+  const crewPid = Object.keys(G.players)[0];
+  const P = G.players[crewPid];
+  P.pos = 7; P.inSpace = null;
+  P.inventory = [{ id: 'flashlight', faceUp: true, charge: 2 }, { id: 'axe', faceUp: false }];
+  G.board[7].hazards.spy = true;                 // фишка шпионажа в локации 7
+  G.board[7].items = [{ id: 'helmet', faceUp: false }];
+  const html = render(viewFor(G, '0'), '0');     // смотрит сама АДЕЛЬ
+
+  // panel «под наблюдением» с инвентарями попавших игроков
+  assert(html.includes('Под наблюдением'), 'у АДЕЛЬ есть панель «под наблюдением»');
+  assert(html.includes('Фонарь'), 'АДЕЛЬ видит предмет из инвентаря игрока на фишке шпионажа');
+  assert(html.includes('Топор'), 'и закрытый ключевой предмет в его инвентаре тоже');
+  // раскрытые названия предметов локации на карте (helmet = Шлем)
+  assert(html.includes('Шлем'), 'предмет в локации со шпионажем раскрыт для АДЕЛЬ');
+
+  // контроль: без фишки шпионажа ни панели, ни инвентаря, ни предмета локации
+  const G2 = baseG();
+  G2.phase = 'actions';
+  const p2 = Object.keys(G2.players)[0];
+  G2.players[p2].pos = 7; G2.players[p2].inSpace = null;
+  G2.players[p2].inventory = [{ id: 'flashlight', faceUp: false, charge: 2 }];
+  G2.board[7].items = [{ id: 'helmet', faceUp: false }];
+  const v2 = viewFor(G2, '0');
+  const html2 = render(v2, '0');
+  assert(!html2.includes('Под наблюдением'), 'без шпионажа панели наблюдения нет');
+  assert(!html2.includes('Фонарь'), 'без шпионажа инвентарь игрока закрыт от АДЕЛЬ');
+  // Предмет на поле скрыт от АДЕЛЬ без шпионажа: проверяем сам playerView, а не
+  // строку — «Шлем» теперь публично стоит в шапке красной миссии (финал), и это
+  // не утечка. Утечкой был бы раскрытый жетон на поле.
+  assert(v2.board[7].items[0].id === 'hidden' && !v2.board[7].items[0].known,
+    'без шпионажа предмет локации закрыт от АДЕЛЬ (playerView отдаёт рубашку)');
+  // Инвентарь p2 тоже приходит рубашкой (без шпионажа и не в одной локации).
+  assert(v2.players[p2].inventory.every(it => it.id === 'hidden'),
+    'без шпионажа инвентарь игрока закрыт от АДЕЛЬ (playerView)');
+}
+
+// --- C9: ники игроков из лобби рядом с именем персонажа и в журнале ---
+{
+  const G = baseG();
+  G.phase = 'planning';
+  const crew = Object.keys(G.players);            // ['1','2','3']
+  const matchData = [
+    { id: 0, name: 'АДЕЛЬ-бот' }, { id: 1, name: 'Алиса' },
+    { id: 2, name: 'Боря' }, { id: 3, name: 'Вика' },
+  ];
+  const nickOf = (pid) => matchData.find(p => String(p.id) === pid).name;
+  const nm1 = CHARACTERS[G.players[crew[0]].character].name;
+  // два упоминания одного персонажа в одном ходе
+  G.log = ['— ХОД 5: событие «Тишина» —', `${nm1} действует.`, `${nm1} осматривает локацию 4.`];
+  const html = render(viewFor(G, crew[0]), crew[0], matchData);
+
+  // ник рядом с именем персонажа в списке экипажа
+  for (const pid of crew) {
+    assert(html.includes(nickOf(pid)), `ник «${nickOf(pid)}» показан в списке экипажа`);
+  }
+  assert(html.includes('pnick'), 'ник у имени персонажа в отдельном теге');
+
+  // журнал: первое упоминание в ходе несёт ник, второе — нет
+  const nickA = nickOf(crew[0]);
+  assert(html.includes(`${nm1} (${nickA}) действует`), 'первое упоминание в ходе несёт ник');
+  assert(html.includes(`${nm1} осматривает`) && !html.includes(`${nm1} (${nickA}) осматривает`),
+    'второе упоминание того же персонажа в ходе ник не повторяет');
+
+  // без matchData (наблюдатель/реконнект) — только имя персонажа, без «undefined»
+  const htmlNo = render(viewFor(G, crew[0]), crew[0]);
+  assert(htmlNo.includes(nm1), 'без matchData имя персонажа на месте');
+  assert(!htmlNo.includes('undefined'), 'без ников нет «undefined»');
+  assert(!htmlNo.includes('pnick'), 'без ников тега ника нет');
+}
+
+// --- C8: инвентарь всегда под рукой — панель видна во всех фазах ---
+{
+  const mkG = (phase, active) => {
+    const G = baseG();
+    G.phase = phase;
+    const pid = Object.keys(G.players)[0];
+    const P = G.players[pid];
+    P.pos = 2; P.inSpace = null; P.acted = false; P.bonusCubes = 0;
+    P.pendingHypoxia = 0; P.pendingDrop = 0;
+    P.inventory = [{ id: 'flashlight', faceUp: false }, { id: 'medkit', faceUp: false }];
+    P.plan = { move: 1, search: 1, activate: 1, special: 0, door: 1,
+      spent: { move: 0, search: 0, activate: 0, special: 0, door: 0 } };
+    if (active) G.activeCrew = pid;
+    return { G, pid };
+  };
+  // фаза планирования (не свой ход по действиям) — панель инвентаря всё равно видна
+  {
+    const { G, pid } = mkG('planning', false);
+    const html = render(viewFor(G, pid), pid);
+    assert(html.includes('Фонарь') && html.includes('Аптечка'),
+      'инвентарь виден в фазе планирования');
+    // но кнопок действий с предметами нет — панель информационная
+    assert(!btnContaining(html, 'Активировать'), 'вне своего хода активировать нельзя — кнопки нет');
+  }
+  // свой ход в фазе действий — та же панель, но с рабочей кнопкой
+  {
+    const { G, pid } = mkG('actions', true);
+    const html = render(viewFor(G, pid), pid);
+    assert(html.includes('Фонарь') && html.includes('Аптечка'), 'инвентарь виден и в фазе действий');
+    const b = btnContaining(html, 'Активировать');
+    assert(b && !b.includes('disabled'), 'в свой ход предмет можно активировать');
+  }
+}
+
 // --- номера локаций покрашены цветом своего сектора ---
 // По цифре на карте должно быть видно, куда она бьёт, без сверки с картой
 // корабля. Цвет берётся из разбиения на секторы, а не вписан руками.
@@ -159,11 +278,13 @@ const baseG = () => {
     { id: 'L2', type: 'loc', locs: [11, 14] },
     { id: 'L3', type: 'loc', locs: [19, 3] },
   ];
-  for (const viewer of ['0', '1']) {
-    const html = render(viewFor(G, viewer), viewer);
+  // Смотрит сама АДЕЛЬ: её рука закрыта от экипажа, номера локаций на картах
+  // руки видит только она (у экипажа — рубашки).
+  {
+    const html = render(viewFor(G, '0'), '0');
     for (const [loc, sector] of [[2, 'green'], [6, 'yellow'], [11, 'grey'], [14, 'red'], [19, 'blue']]) {
       assert(html.includes(`<b class="sect ${sector}">${loc}</b>`),
-        `номер ${loc} покрашен в ${sector} — сектор своей локации (смотрит ${viewer})`);
+        `номер ${loc} покрашен в ${sector} — сектор своей локации`);
     }
     assert(!html.includes('class="sect undefined"'), 'нераспознанных секторов нет');
   }
@@ -338,20 +459,25 @@ const specialCard = (id) => ({ ...ADEL_SPECIALS.find(c => c.id === id) });
   G.board[5].items = [{ id: 'extinguisher', faceUp: false }];
 
   const before = render(viewFor(G, pid), pid);
-  assert(before.includes('▩ не осмотрено'), 'до осмотра предмет закрыт');
-  assert(!before.includes('Взять:'), 'до осмотра выбора «взять» нет');
-  const searchBtn = buttonWith(before, '🔍 Поиск (осмотреть локацию)');
+  // До осмотра предмет в локации показан рубашкой, а название скрыто.
+  assert(before.includes('itemcard back'), 'до осмотра предмет закрыт (рубашка)');
+  assert(!before.includes('Огнетушитель'), 'до осмотра название предмета не показано');
+  assert(!before.includes('Забрать предмет?'), 'до осмотра выбора «взять» нет');
+  const searchBtn = btnContaining(before, 'осмотреть локацию');
   assert(searchBtn && !searchBtn.includes('disabled'), 'поиск доступен');
+  assert(searchBtn.includes('1⬛'), 'на кнопке поиска показана цена (1 кубик)');
 
   // движок отработал осмотр
   Adel.moves.actSearch.move({ G, playerID: pid }, false);
   const after = render(viewFor(G, pid), pid);
   assert(after.includes('Забрать предмет?'), 'после осмотра предложено решение');
-  assert(buttonWith(after, 'Взять: Огнетушитель'), 'предмет назван и предложен к взятию');
+  // Найденное — кликабельной полной карточкой с названием (не текстовой кнопкой).
+  assert(after.includes('itemcard full pickable') && after.includes('Огнетушитель'),
+    'найденный предмет показан полной карточкой и назван');
   assert(buttonWith(after, 'Оставить на месте'), 'от находки можно отказаться');
   assert(after.includes('Кубик уже потрачен'),
     'игроку сказано, что решение входит в то же действие');
-  const again = buttonWith(after, '🔍 Поиск (осмотреть локацию)');
+  const again = btnContaining(after, 'осмотреть локацию');
   assert(again && again.includes('disabled'), 'повторно осматривать ту же локацию нечего');
 }
 
@@ -491,7 +617,10 @@ const cellsOf = (col, type, cost) =>
   G.adel.console.fire = [3, 5, 5];
   const html = render(viewFor(G, '0'), '0');
   assert((html.match(/class="chip on/g) || []).length === 3, 'занятых ячеек ровно три');
-  assert(html.includes(HAZARD_ICON.fire), 'на ячейке пожара тот же значок, что на карте корабля');
+  // Фишки — ассетами из манифеста. На ячейке пожара тот же значок «Пожар», что
+  // рисует ChipIcon и на карте корабля; проверяем сам факт картинки-фишки.
+  assert(html.includes('alt="Пожар"'), 'на ячейке пожара — значок «Пожар» ассетом, единый с картой');
+  assert(html.includes('.webp'), 'фишки отрисованы картинками (webp), а не эмодзи');
 
   // «Самая дорогая фишка вида» — её АДЕЛЬ обязана снять следующей.
   const cols = conCols(html);
@@ -928,7 +1057,8 @@ const cellsOf = (col, type, cost) =>
     const b = clearBtn(html);
     assert(b && b.includes('disabled'), 'с доплатой за тьму трёх кубиков мало — кнопка заблокирована');
     assert(b.includes('нужно кубиков: 4, есть 3'), 'сказано, сколько нужно и сколько есть');
-    assert(b.includes('3⬛ +1'), 'доплата показана на самой кнопке');
+    assert(b.includes('4⬛'), 'на кнопке общее число кубиков с доплатой — 4');
+    assert(b.includes('3 базовых + 1 тьма'), 'в тултипе — расшифровка цены');
   }
   // «Вредоносная программа» — тот же лишний кубик.
   {
@@ -956,7 +1086,7 @@ const cellsOf = (col, type, cost) =>
   {
     const { html } = ready((G) => { G.board[14].hazards.hypoxia = false; });
     const b = clearBtn(html);
-    assert(b && b.includes('disabled') && b.includes('рядом нет фишки'),
+    assert(b && b.includes('disabled') && b.includes('здесь нет фишки'),
       'когда убирать нечего, это сказано');
   }
   // Кубиков хватает ровно: доступно.
@@ -965,6 +1095,89 @@ const cellsOf = (col, type, cost) =>
     const b = clearBtn(html);
     assert(b && !b.includes('disabled'), 'с четырьмя кубиками действие во тьме доступно');
   }
+}
+
+// ============================================================
+// A2: цена на кнопке = то, что реально спишет движок (все комбинации)
+// ============================================================
+// Единая функция actionCost считает цену и для интерфейса, и для движка.
+// Проверяем прямо: сколько показывает actionCost (столько и на кнопке) — ровно
+// столько кубиков движок и спишет, во всех сочетаниях тьмы, «вредоносной
+// программы» и способности Мэй.
+{
+  const mv = (name) => Adel.moves[name].move;
+  const spentOf = (P) => Object.values(P.plan.spent).reduce((a, b) => a + b, 0);
+  const setupAct = ({ dark, malware, char }) => {
+    const G = baseG();
+    G.phase = 'actions';
+    const pid = Object.keys(G.players).find(p => G.players[p].character === char);
+    const P = G.players[pid];
+    G.activeCrew = pid;
+    P.acted = false; P.bonusCubes = 0; P.inSpace = null;
+    P.pendingHypoxia = 0; P.pendingDrop = 0; P.pos = 2;
+    // кубиков заведомо хватает: база из своего пула, доплата — с любого
+    P.plan = { move: 4, search: 4, activate: 4, special: 4, door: 4,
+      spent: { move: 0, search: 0, activate: 0, special: 0, door: 0 } };
+    if (dark) G.board[2].hazards.darkness = true;
+    if (malware) G.eventOngoing = 'malware';
+    return { G, P, pid };
+  };
+  // Как выполнить каждое действие; предусловия ставятся здесь же. На цену
+  // (actionCost) они не влияют — только тьма/malware/персонаж.
+  const RUN = {
+    move: (G, P, pid) => mv('actMove')({ G, playerID: pid, random: makeRandom() }, 1),
+    search: (G, P, pid) => mv('actSearch')({ G, playerID: pid, random: makeRandom() }, false),
+    activate: (G, P, pid) => { P.inventory = [{ id: 'battery', faceUp: false }]; return mv('actActivate')({ G, playerID: pid, random: makeRandom() }, 0); },
+    door: (G, P, pid) => { G.board[2].doors = [1]; return mv('actOpenDoor')({ G, playerID: pid, random: makeRandom() }, 1); },
+    special: (G, P, pid) => { P.inventory = []; G.board[2].hazards.hypoxia = true; return mv('actSpecial')({ G, playerID: pid, random: makeRandom() }, { kind: 'clearHazard', hazard: 'hypoxia', loc: 2 }); },
+  };
+  for (const action of ['move', 'search', 'activate', 'door', 'special']) {
+    for (const dark of [false, true]) {
+      for (const malware of [false, true]) {
+        for (const char of ['artem', 'mei']) {
+          const { G, P, pid } = setupAct({ dark, malware, char });
+          const tag = `${action} (тьма=${dark}, malware=${malware}, ${char})`;
+          const shown = actionCost(G, pid, action).need;   // столько показывает кнопка
+          const before = spentOf(P);
+          const r = RUN[action](G, P, pid);
+          assert(r !== 'INVALID_MOVE', `${tag}: действие выполнилось`);
+          const deducted = spentOf(P) - before;
+          assert(shown === deducted, `${tag}: на кнопке ${shown}⬛, движок списал ${deducted}`);
+        }
+      }
+    }
+  }
+}
+
+// --- A2: цена показана на самих кнопках обычных действий (с тьмой) ---
+{
+  const G = baseG();
+  G.phase = 'actions';
+  const pid = Object.keys(G.players).find(p => G.players[p].character === 'artem');
+  const P = G.players[pid];
+  G.activeCrew = pid;
+  P.pos = 2; P.inSpace = null; P.acted = false; P.bonusCubes = 0;
+  P.pendingHypoxia = 0; P.pendingDrop = 0;
+  P.inventory = [{ id: 'battery', faceUp: false }];
+  P.plan = { move: 2, search: 2, activate: 2, special: 0, door: 2,
+    spent: { move: 0, search: 0, activate: 0, special: 0, door: 0 } };
+  G.board[2].hazards.darkness = true;   // база 1 + тьма 1 = 2⬛ на каждой кнопке
+  const html = render(viewFor(G, pid), pid);
+  const btnAround = (word) => {
+    const i = html.indexOf(word);
+    if (i < 0) return null;
+    const j = html.lastIndexOf('<button', i);
+    const k = html.indexOf('</button>', i);
+    return (j < 0 || k < 0) ? null : html.slice(j, k + 9);
+  };
+  const moveB = btnAround('клик по локации');
+  assert(moveB && moveB.includes('2⬛'), 'на кнопке движения показана цена с тьмой (2⬛)');
+  const searchB = btnAround('осмотреть локацию');
+  assert(searchB && searchB.includes('2⬛'), 'на кнопке поиска показана цена с тьмой');
+  const doorB = btnAround('Открыть дверь');
+  assert(doorB && doorB.includes('2⬛'), 'на кнопке двери показана цена с тьмой');
+  const actB = btnAround('Активировать');
+  assert(actB && actB.includes('2⬛'), 'на кнопке активации показана цена с тьмой');
 }
 
 // --- фаза действий у экипажа: панель хода не падает ---
@@ -979,6 +1192,82 @@ const cellsOf = (col, type, cost) =>
   };
   const html = render(viewFor(G, pid), pid);
   assert(html.includes('Ваш ход'), 'панель хода отрисована');
+}
+
+// --- Карточки предметов (ItemCard): thumb / full / faceDown / fallback ---
+{
+  const rc = (props) => strip(renderToString(React.createElement(ItemCard, props)));
+
+  const thumb = rc({ id: 'axe', size: 'thumb' });
+  assert(thumb.includes('itemcard thumb'), 'ItemCard thumb: класс миниатюры');
+  assert(thumb.includes('<img') && thumb.includes('.webp'), 'ItemCard thumb: картинка-ассет webp');
+  assert(thumb.includes('Топор'), 'ItemCard thumb: название в alt/подсказке');
+  assert(thumb.includes('m-blue'), 'ItemCard: рамка цвета миссии (топор — синяя)');
+
+  const full = rc({ id: 'medkit', size: 'full' });
+  assert(full.includes('itemcard full'), 'ItemCard full: класс полной карточки');
+  assert(full.includes('Аптечка'), 'ItemCard full: название');
+  assert(full.includes(ITEM_EFFECTS.medkit), 'ItemCard full: текст эффекта из data.js');
+
+  // faceDown — рубашка, названия нет (так рисуется чужой скрытый предмет).
+  const back = rc({ id: 'axe', size: 'thumb', faceDown: true });
+  assert(back.includes('itemcard back'), 'ItemCard faceDown: рубашка');
+  assert(!back.includes('Топор'), 'ItemCard faceDown: название скрыто (рубашка, не карточка)');
+  assert(rc({ id: 'hidden', size: 'thumb' }).includes('itemcard back'),
+    'ItemCard id=hidden (как из playerView) → рубашка');
+
+  // fallback — арта в манифесте нет: текст, без битой картинки и без падения.
+  const fb = rc({ id: 'no_such_item', size: 'full' });
+  assert(fb.includes('itemcard fallback'), 'ItemCard без арта: текстовый фолбэк');
+  assert(!fb.includes('<img'), 'ItemCard фолбэк: без битой картинки');
+
+  // note — у известного предмета скрыта только локация (маркер миссии).
+  const noted = rc({ id: 'blue_card', size: 'thumb', note: '▩ локация скрыта' });
+  assert(noted.includes('Синяя карта') && noted.includes('локация скрыта'),
+    'ItemCard: предмет показан, скрыта лишь локация — пометкой');
+}
+
+// --- Точки показа: инвентарь, миссии, разведка рендерят карточки ---
+{
+  const G = baseG();
+  G.phase = 'actions';
+  const pid = Object.keys(G.players)[0];
+  G.activeCrew = pid;
+  const P = G.players[pid];
+  P.pos = 6; P.inSpace = null;
+  P.inventory = [{ id: 'battery', faceUp: true, charge: 2 }, { id: 'blue_card', faceUp: false }];
+  P.plan = { move: 1, search: 1, activate: 1, special: 1, door: 0, spent: { move: 0, search: 0, activate: 0, special: 0, door: 0 } };
+  P.knownItems = { 9: ['medkit'] };               // как после дрона/поиска
+  const html = render(viewFor(G, pid), pid);
+
+  assert(html.includes('Инвентарь') && html.includes('itemcard thumb'),
+    'инвентарь показывает миниатюры карточек');
+  assert(html.includes('Батарея'), 'свой предмет назван в карточке инвентаря');
+
+  for (const s of MARKER_SLOTS) assert(html.includes(ITEMS[s].name), `маркер «${ITEMS[s].name}» показан в миссиях`);
+  assert(html.includes('Топор') && html.includes('Шлем'), 'финальные топор и шлем — в шапках миссий');
+  assert(html.includes('локация скрыта'), 'у скрытого маркера — пометка «локация скрыта»');
+
+  assert(html.includes('Разведка') && html.includes('Аптечка'),
+    'панель разведки показывает известный предмет карточкой (результат дрона/поиска)');
+}
+
+// --- Скрытое остаётся рубашкой: чужой закрытый предмет не раскрывается ---
+{
+  const G = baseG();
+  G.phase = 'actions';
+  const [me, other] = Object.keys(G.players);
+  G.players[me].pos = 5; G.players[me].inSpace = null;        // терминал доставки
+  G.players[other].pos = 9; G.players[other].inSpace = null;  // НЕ в одной локации
+  G.players[other].inventory = [{ id: 'axe', faceUp: false }];
+  G.activeCrew = me;
+  G.players[me].plan = { move: 0, search: 0, activate: 0, special: 4, door: 0, spent: { move: 0, search: 0, activate: 0, special: 0, door: 0 } };
+
+  const V = viewFor(G, me);
+  assert(V.players[other].inventory[0].id === 'hidden', 'чужой закрытый предмет вырезан в playerView');
+  const html = render(V, me);
+  assert(html.includes('itemcard back'), 'на терминале доставки чужой скрытый предмет — рубашкой');
+  assert(html.includes('забрать «предмет 1»'), 'в подписи «забрать» название не раскрыто');
 }
 
 console.error = realError;

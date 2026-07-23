@@ -369,20 +369,23 @@ const play = (G, cardId, payload, random = makeRandom()) =>
   }
 }
 {
-  // Специальные карты лежат в общей руке. Рука АДЕЛЬ открыта экипажу — так
-  // решил владелец коробки, — а вот сброс и порядок колоды закрыты: иначе обе
-  // стороны знали бы ход событий наперёд.
+  // Рука АДЕЛЬ ЗАКРЫТА от экипажа (решение владельца): виден только счёт карт,
+  // не сами карты. Сброс и порядок колоды тоже закрыты. Аргументы ходов идут
+  // отдельным каналом — их вырезает redact: true, иначе рука утекла бы мимо
+  // playerView.
   const G = Adel.setup({ ctx: { numPlayers: 4 }, random: makeRandom() });
   G.adel.hand = [spec('S_reshuffle'), spec('S_energy')];
   G.adel.discard = [spec('S_recall')];
   const crew = Adel.playerView({ G, playerID: '1' });
-  assert(crew.adel.hand.map(c => c.id).join(',') === 'S_reshuffle,S_energy',
-    'экипаж видит специальные карты в руке АДЕЛЬ поимённо');
-  assert(crew.adel.hand.every(c => c.name && c.text),
-    'и с названием и текстом — иначе по карте ничего не понять');
+  assert(crew.adel.hand.length === 2, 'экипаж видит ЧИСЛО карт в руке АДЕЛЬ');
+  assert(crew.adel.hand.every(c => c.id === 'hidden'), 'но не сами карты — они рубашкой');
+  assert(!crew.adel.hand.some(c => c.name || c.text || c.locs),
+    'ни названия, ни текста, ни локаций карт руки не утекает');
   assert(typeof crew.adel.discard === 'number', 'состав сброса АДЕЛЬ скрыт от экипажа');
   assert(typeof crew.adel.deck === 'number', 'порядок колоды АДЕЛЬ тоже закрыт');
   assert(crew.adel.specials === undefined, 'отдельной выкладки специальных карт нет и в виде');
+  assert(Adel.moves.adelPlayCard.redact === true && Adel.moves.adelDiscard.redact === true,
+    'аргументы ходов АДЕЛЬ вырезаны из журнала (redact) — иначе рука утекла бы мимо playerView');
 
   const own = Adel.playerView({ G, playerID: '0' });
   assert(own.adel.hand.some(c => c.id === 'S_reshuffle'), 'свою руку АДЕЛЬ видит');

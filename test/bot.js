@@ -150,8 +150,11 @@ export function planFor(G, pid, S) {
   return { ...NO_CUBES, move: Math.min(3, Math.max(1, dist)), search: 4 - Math.min(3, Math.max(1, dist)) };
 }
 
-// Встреча в одной локации: по правилам напарники показывают друг другу маркеры
-// и свободно обмениваются предметами. Знание запоминается — вслух его уже
+// Встреча в одной локации: напарники показывают друг другу маркеры и предметы
+// (shareInfo). Передачи предметов при встрече больше нет (решение владельца —
+// единственный способ передать предмет теперь терминал доставки). Но показ
+// маркеров раскрывает носителю локацию его находки: узнав её от напарника-
+// «зрителя», игрок доставляет предмет сам. Знание запоминается — вслух его уже
 // сказали, и «забыть» его нельзя, даже когда разойдутся.
 function meet(G, pid, S) {
   const P = G.players[pid];
@@ -164,15 +167,6 @@ function meet(G, pid, S) {
     for (const slot of MARKER_SLOTS) {
       if (G.missions.viewers[slot].includes(other)) S[pid].known[slot] = G.missions.markers[slot].loc;
       if (G.missions.viewers[slot].includes(pid)) S[other].known[slot] = G.missions.markers[slot].loc;
-    }
-    // предмет отдаём тому, кто знает, куда его нести
-    for (let i = P.inventory.length - 1; i >= 0; i--) {
-      const it = P.inventory[i];
-      if (ITEMS[it.id].kind !== 'key' || ITEMS[it.id].final) continue;
-      if (G.missions.delivered[it.id]) continue;
-      const mineKnows = targetOf(G, pid, it.id, S[pid].known) != null;
-      const theirsKnows = targetOf(G, other, it.id, S[other].known) != null;
-      if (!mineKnows && theirsKnows) mv('giveItem')({ G, playerID: pid }, other, i);
     }
   }
 }

@@ -262,7 +262,10 @@ const adelPlaysCards = (safeLocs) => (G, random) => {
   assert(Object.values(deal).filter(id => ITEMS[id].kind === 'key').length >= 4,
     'ключевые предметы разложены по локациям');
   G.pointOfNoReturn = 1;
-  // «Дрейф» поднимает точку невозврата — красной миссии становится теснее.
+  // Точка невозврата двигается ТОЛЬКО событием «Дрейф» (решение владельца,
+  // возврат к буклету): ежеходного сдвига нет. В колоде ровно один «Дрейф» —
+  // за партию точка уходит ровно на одно деление, побег остаётся запасным
+  // планом, а не гонкой.
   stackEvents(G, ['silence', 'drift', 'silence', 'silence', 'silence', 'silence',
     'silence', 'silence', 'silence', 'silence', 'silence', 'silence',
     'silence', 'silence', 'silence', 'silence', 'silence', 'silence']);
@@ -279,8 +282,8 @@ const adelPlaysCards = (safeLocs) => (G, random) => {
     });
   }
 
-  assert(G.pointOfNoReturn > 1, `«Дрейф» поднял точку невозврата до ${G.pointOfNoReturn}`);
-  assert(G.winner === 'crew', );
+  assert(G.pointOfNoReturn === 2, `единственный «Дрейф» двигает точку ровно на 1 (до ${G.pointOfNoReturn}), ежеходного сдвига нет`);
+  assert(G.winner === 'crew', 'экипаж сбежал по красной миссии');
   if (process.env.ADEL_VERBOSE) console.log('  красная миссия: ' + turns + ' ходов');
   assert(turns === 9, `красная миссия занимает 9 ходов, вышло ${turns}`);
   assert(G.turnNo >= G.pointOfNoReturn,

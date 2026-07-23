@@ -4,7 +4,7 @@
 import {
   ADJ, SECTOR_OF, HATCHES, SPACE_SECTIONS, SPACE_ADJ, SPACE_NEAR,
 } from '../src/game/data.js';
-import { POS, BOX_W, BOX_H, xy, center } from '../src/client/layout.js';
+import { POS, BOX_W, BOX_H, CELL_X, CELL_Y, xy, center } from '../src/client/layout.js';
 
 let failed = 0;
 const assert = (cond, msg) => { if (!cond) { console.error('FAIL:', msg); failed += 1; } };
@@ -34,6 +34,14 @@ const LOCS = Array.from({ length: 20 }, (_, i) => i + 1);
 
 // у каждой локации есть место на схеме
 for (const l of LOCS) assert(POS[l], `локация ${l} отсутствует в раскладке карты`);
+
+// Коробки локаций укрупнены относительно ячейки: карта читаемее, пустого места
+// между коробками меньше. Это единственный осмысленный «размерный» рычаг —
+// одинаковое масштабирование BOX+CELL viewBox гасит. Ниже 0.85/0.82 коробки
+// «тонут» в сетке. Проверки перекрытия и пересечения ниже стерегут, что
+// укрупнение не столкнуло коробки и не пустило линию перехода сквозь соседа.
+assert(BOX_W / CELL_X >= 0.85, `коробки узкие: BOX_W/CELL_X = ${(BOX_W / CELL_X).toFixed(3)} < 0.85`);
+assert(BOX_H / CELL_Y >= 0.82, `коробки низкие: BOX_H/CELL_Y = ${(BOX_H / CELL_Y).toFixed(3)} < 0.82`);
 
 // коробки не налезают друг на друга
 for (const a of LOCS) {

@@ -54,16 +54,21 @@ header { display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap; borde
 /* Карта больше не приклеена к верху: под ней теперь консоль, и «липкая»
    карта уезжала бы вместе с ней. */
 .mapwrap { position: relative; }
-.map { background: linear-gradient(180deg, #0e1520, #0b1017); border: 1px solid var(--line); border-radius: 12px; max-width: 100%; height: auto; }
-.loc { fill: #121a25; stroke-width: 2; }
+/* width:100% — карта занимает всю ширину своей колонки (под ней консоль, место
+   есть). viewBox+height:auto держат пропорции, поэтому горизонтального скролла
+   нет ни на 1920, ни на 1366. */
+.map { background: linear-gradient(180deg, #0e1520, #0b1017); border: 1px solid var(--line); border-radius: 12px; width: 100%; max-width: 100%; height: auto; }
+.loc { fill: #121a25; stroke-width: 2.5; }
 .locg { cursor: pointer; }
 .locg:hover .loc { fill: #1a2534; }
-.locnum { fill: var(--amber); font: 700 13px 'Unbounded'; }
-.term { fill: var(--dim); font-size: 9px; }
-.alarm, .hatch { font-size: 11px; fill: var(--ink); }
-.itm { fill: #9fb3c8; font-size: 9px; }
-.hz { font-size: 12px; }
-.door { stroke: #33465c; stroke-width: 4; }
+/* Крупнее всё на карте: номера, терминалы, значки, названия предметов. */
+.locnum { fill: var(--amber); font: 700 17px 'Unbounded'; }
+.term { fill: var(--dim); font-size: 11px; }
+.alarm, .hatch { font-size: 15px; fill: var(--ink); }
+.itm { fill: #9fb3c8; font-size: 11px; }
+.hz { font-size: 16px; }
+.hz.small { font-size: 13px; }
+.door { stroke: #33465c; stroke-width: 5; }
 .door.blocked { stroke: var(--alert); stroke-dasharray: 6 4; cursor: pointer; }
 .pawn { stroke: #0c1117; stroke-width: 2; }
 .pawn.c1 { fill: #63d68c; } .pawn.c2 { fill: #5aa7ff; } .pawn.c3 { fill: #ff8fd8; } .pawn.c4 { fill: #ffd75a; }
@@ -85,6 +90,14 @@ header { display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap; borde
 .planrow, .specialrow { display: flex; justify-content: space-between; align-items: center; margin: 4px 0; gap: 8px; }
 .planrow b { display: inline-block; width: 22px; text-align: center; color: var(--amber); }
 .specialrow span:first-child { font-size: 12px; }
+/* Ценник на кнопке действия: общее число кубиков. Расшифровка — в тултипе. */
+.price { color: var(--amber); font-weight: 700; margin-left: 4px; white-space: nowrap; }
+/* Ник игрока из лобби рядом с именем персонажа. */
+.pnick { color: var(--accent, #6cf); font-weight: 600; }
+/* Панель «под наблюдением» у АДЕЛЬ: что видно через фишку шпионажа. */
+.watchlist { display: flex; flex-direction: column; gap: 4px; margin: 4px 0; }
+.watchloc { font-size: 12px; border-left: 2px solid var(--amber); padding-left: 6px; }
+.watchinv { color: var(--dim, #9aa); padding-left: 10px; }
 .btns { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
 .cubes { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
 .cube { background: var(--panel2); border: 1px solid var(--line); border-radius: 6px; padding: 2px 7px; font-size: 11px; }
@@ -352,3 +365,125 @@ button.anom:hover { border-color: var(--amber); color: var(--amber); }
 @keyframes diereel { from { transform: translateY(0); } to { transform: translateY(-100%); } }
 /* prefers-reduced-motion: лента стоит на первой грани, результат появляется
    сразу — вращения нет вовсе, а не «замедленное». */
+
+/* ============================================================
+   Карточки предметов (ItemCard) — миниатюра / полная / рубашка / фолбэк.
+   Рамка подкрашена цветом миссии предмета. Одна отрисовка на все места показа.
+   ============================================================ */
+.itemcard { position: relative; box-sizing: border-box; }
+.itemcard.thumb {
+  display: inline-flex; width: 44px; height: 44px; flex: 0 0 auto; vertical-align: middle;
+  border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #0f1621;
+}
+.itemcard.thumb img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.itemcard.full {
+  display: flex; flex-direction: column; width: 148px; flex: 0 0 auto;
+  border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
+  background: linear-gradient(180deg, #1b2532, #131b25);
+}
+.itemcard.full .ic-art { background: #0f1621; }
+.itemcard.full .ic-art img { width: 100%; aspect-ratio: 1; object-fit: contain; display: block; }
+.itemcard.full figcaption { padding: 6px 8px; }
+.itemcard .ic-name { display: block; font-size: 12px; color: var(--ink); font-weight: 600; }
+.itemcard .ic-eff { display: block; font-size: 10px; color: var(--dim); line-height: 1.35; margin-top: 3px; }
+
+/* Рамка цветом миссии — как у маркеров: синяя / красная / обе. */
+.itemcard.m-blue { border-color: #2c4a7c; }
+.itemcard.m-red { border-color: #7c2c2c; }
+.itemcard.m-both { border-color: #4a4a7c; }
+
+/* Рубашка (скрытый / чужой предмет): своя, в стиле пульта — НЕ из ассетов. */
+.itemcard.back {
+  display: inline-flex; align-items: center; justify-content: center; vertical-align: middle;
+  border: 1px solid var(--amber-dim); border-radius: 8px;
+  background: repeating-linear-gradient(45deg, #141c26, #141c26 6px, #18212d 6px, #18212d 12px);
+}
+.itemcard.back.thumb { width: 44px; height: 44px; }
+.itemcard.back.full { width: 148px; height: 190px; }
+.itemcard.back .ic-hex {
+  font-family: 'Unbounded', sans-serif; font-weight: 700; color: var(--amber);
+  font-size: 20px; opacity: .8; text-shadow: 0 0 8px rgba(255, 179, 71, .4);
+}
+.itemcard.back.full .ic-hex { font-size: 40px; }
+
+/* Фолбэк без арта: текстом, без падения. */
+.itemcard.fallback {
+  display: inline-flex; flex-direction: column; justify-content: center; gap: 3px;
+  min-width: 44px; min-height: 44px; padding: 4px 6px; vertical-align: middle;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel2);
+}
+.itemcard.fallback.full { width: 148px; }
+.itemcard.fallback .ic-fbname { font-size: 11px; color: var(--ink); font-weight: 600; }
+
+/* Значки поверх карточки: доставлено / заряд / пометка (скрытая локация). */
+.ic-badge {
+  position: absolute; font-size: 9px; line-height: 1.4; padding: 0 4px; border-radius: 6px;
+  font-weight: 700; z-index: 2;
+}
+.ic-badge.done { top: 2px; right: 2px; background: var(--ok); color: #08130c; }
+.ic-badge.charge { bottom: 2px; right: 2px; background: var(--amber); color: #14100a; }
+.ic-note {
+  position: absolute; left: 0; right: 0; bottom: 0; z-index: 2;
+  background: rgba(8, 12, 18, .82); color: var(--amber); font-size: 8px; line-height: 1.5;
+  text-align: center; padding: 1px 2px;
+}
+.itemcard.full .ic-note { font-size: 10px; padding: 2px; }
+
+/* Кликабельная карточка (взять из поиска, выбрать из лаборатории). */
+.itemcard.pickable { cursor: pointer; }
+.itemcard.pickable:hover { outline: 2px solid var(--amber); outline-offset: -1px; }
+
+/* Всплывающая полная карточка по ховеру миниатюры (инвентарь и пр.). */
+.ic-wrap { position: relative; display: inline-block; vertical-align: middle; }
+.ic-pop { position: absolute; z-index: 40; left: 0; top: 100%; margin-top: 4px; display: none;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .55); }
+.ic-wrap:hover .ic-pop, .ic-wrap:focus-within .ic-pop { display: block; }
+
+/* Ряды карточек: поиск, лаборатория, разведка, наблюдение. */
+.foundcards { display: inline-flex; flex-wrap: wrap; gap: 6px; vertical-align: middle; align-items: center; }
+.foundcards.full { display: flex; gap: 8px; margin-top: 4px; }
+
+/* Мелкая миниатюра в строке спец-действия (доставка) и в шапке миссии. */
+.itemcard.thumb.rowicon { width: 26px; height: 26px; border-radius: 6px; margin-right: 6px; }
+.itemcard.thumb.mfinal { width: 30px; height: 30px; border-radius: 6px; float: left; margin: 0 6px 0 0; }
+
+/* Инвентарь: миниатюра + кнопка действия рядом. */
+.inv .item { align-items: center; }
+
+/* Маркеры миссий: карточка предмета слева, текст справа. */
+.marker { flex-direction: row; align-items: flex-start; gap: 8px; }
+.marker .itemcard.thumb { width: 38px; height: 38px; }
+.minfo { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+
+/* Разведка (дрон / поиск). */
+.scouted .scoutlist { display: flex; flex-direction: column; gap: 6px; }
+.scoutloc { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.scoutloc b { font-size: 11px; color: var(--amber); }
+
+/* Наблюдение (АДЕЛЬ): миниатюры вместо имён. */
+.watchitems, .watchinv { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+
+/* ============================================================
+   Фишки опасностей: карта корабля, консоль, легенда.
+   ============================================================ */
+/* Фишка на карте — SVG <image>; тень для читаемости на тёмном поле. */
+.hzchip { filter: drop-shadow(0 1px 1px rgba(0, 0, 0, .6)); }
+
+/* Пустая ячейка консоли — тот же значок, но обесцвеченный и полупрозрачный
+   (CSS-фильтр, отдельных файлов нет). Занятая — в полном цвете. */
+.chip.off img.icon { filter: grayscale(1) brightness(1.15); opacity: .5; }
+.chip.on img.icon { filter: none; }
+/* Занятая ячейка — «подсвеченный» слот под круглой фишкой вместо сплошной
+   янтарной заливки (у фишки прозрачные углы). */
+.chip.on {
+  background: radial-gradient(circle at 50% 45%, #2a3543, #131b25);
+  border-color: var(--amber); box-shadow: inset 0 0 6px rgba(255, 179, 71, .22);
+}
+
+/* Легенда «что есть что» под картой. */
+.legend {
+  display: flex; flex-wrap: wrap; gap: 6px 14px; margin-top: 8px; padding: 8px 12px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+}
+.legitem { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--dim); }
+.legitem img.icon { width: 22px; height: 22px; object-fit: contain; display: block; }

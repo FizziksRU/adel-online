@@ -1,16 +1,18 @@
 import React, { useState, useRef, useEffect, useMemo } from 'react';
 import {
   ADJ, SECTOR_OF, SECTOR_NAMES, TERMINALS, TERMINAL_NAMES, HATCHES, SPACE_NEAR,
-  CHARACTERS, ITEMS, HAZARD_NAMES, HAZARD_ICON, EVENTS, ANOMALIES, ANOMALY_COST, MARKER_SLOTS,
-  ACTION_NAMES, SPACE_SECTIONS, SPACE_NAMES, SPACE_ADJ,
+  CHARACTERS, ITEMS, HAZARDS, HAZARD_NAMES, HAZARD_ICON, EVENTS, ANOMALIES, ANOMALY_COST, MARKER_SLOTS,
+  ACTION_NAMES, COST_MOD_NAMES, SPACE_SECTIONS, SPACE_NAMES, SPACE_ADJ,
   ADEL_HAND_LIMIT,
 } from '../game/data.js';
 
 import {
-  hazardCardRules, ATTACK_CARD, specialPlan, clearHazardTargets, computerBlockedWhy,
+  hazardCardRules, ATTACK_CARD, actionCost, clearHazardTargets, computerBlockedWhy,
 } from '../game/index.js';
 import { AdelCardPicker, chooseCardLoc, cardLabel, CardLabel, LocNum, availableTypes } from './AdelCards.jsx';
 import { AdelConsole } from './Console.jsx';
+import { ItemCard } from './ItemCard.jsx';
+import { ChipIcon, chipSrc } from './icons.jsx';
 import { SpiritPrompt, RollOverlay, LastRoll, rollShowPlan } from './SpiritRoll.jsx';
 import { HealthTrack, CrewRoster } from './Health.jsx';
 import { POS, PAD, BOX_W, BOX_H, CELL_X, CELL_Y, xy, gridMax } from './layout.js';
@@ -28,7 +30,7 @@ const MOVE_NAMES = {
   actActivate: 'активация предмета', actOpenDoor: 'открыть дверь',
   actSpecial: 'специальное действие', dropItem: 'сбросить предмет',
   payHypoxia: 'отдать кубик', claimActive: 'начать ход', finishTurn: 'завершить действия',
-  giveItem: 'передать предмет', shareInfo: 'показать маркеры', droneLook: 'дрон',
+  shareInfo: 'показать маркеры', droneLook: 'дрон',
   useBattery: 'батарея', pickLab: 'взять из лаборатории', applyMedkit: 'аптечка',
   leaveItem: 'оставить предмет',
   adelPlayCard: 'сыграть карту', adelDiscard: 'сбросить карту',
@@ -70,10 +72,43 @@ function remainingColors(anomaly, pays) {
   return need;
 }
 
-export function Board({ G, ctx, moves: rawMoves, playerID }) {
+// Ник из лобби у ПЕРВОГО упоминания персонажа в каждом ходе журнала. Движок
+// пишет только имя персонажа (ники — клиентские и публичные), поэтому
+// подставляем их здесь, над G.log. Разбор идёт по ходам: на строке-разделителе
+// «— ХОД n: …» счётчик упомянутых сбрасывается. Длинные имена матчим первыми,
+// чтобы частичное совпадение не поймало чужое имя. Возвращаем строки — React
+// экранирует их как текст, поэтому ник из лобби нельзя подсунуть как разметку.
+export function annotateLog(lines, players, nickOf) {
+  const named = [];
+  for (const pid of Object.keys(players)) {
+    const name = CHARACTERS[players[pid].character]?.name;
+    const nick = nickOf(pid);
+    if (name && nick) named.push({ pid, name, nick });
+  }
+  if (!named.length) return [...lines];
+  named.sort((a, b) => b.name.length - a.name.length);
+  const seen = new Set();
+  return lines.map(line => {
+    if (/^— ХОД \d+:/.test(line)) seen.clear();
+    let out = line;
+    for (const { pid, name, nick } of named) {
+      if (seen.has(pid)) continue;
+      const i = out.indexOf(name);
+      if (i < 0) continue;
+      out = out.slice(0, i + name.length) + ` (${nick})` + out.slice(i + name.length);
+      seen.add(pid);
+    }
+    return out;
+  });
+}
+
+export function Board({ G, ctx, moves: rawMoves, playerID, matchData }) {
   const me = playerID;
   const isAdel = me === '0';
   const myP = !isAdel ? G.players[me] : null;
+  // Ник игрока по его seat-id из matchData (boardgame.io отдаёт его в проп).
+  // null, если ника нет или matchData не пришёл (наблюдатель, реконнект, тесты).
+  const nickOf = (pid) => (matchData?.find(p => String(p.id) === pid)?.name) || null;
   const [sel, setSel] = useState(null);        // текущее «ожидание клика по карте»
   const [plan, setPlan] = useState({ move: 2, search: 1, activate: 0, special: 0, door: 1 });
   const [msg, setMsg] = useState('');
@@ -132,7 +167,6 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
     switch (sel.kind) {
       case 'move': moves.actMove(l); done(); break;
       case 'openDoor': moves.actOpenDoor(l); done(); break;
-      case 'clearHazard': moves.actSpecial({ kind: 'clearHazard', hazard: sel.hazard, loc: l, risky: sel.risky }); done(); break;
       case 'repairTerminal': moves.actSpecial({ kind: 'terminal', loc: l, risky: sel.risky }); done(); break;
       case 'centralUnlock': moves.actSpecial({ kind: 'terminal', loc: l, slot: sel.slot, risky: sel.risky }); done(); break;
       case 'repairFromSpace': moves.actSpecial({ kind: 'repairFromSpace', loc: l, risky: sel.risky }); done(); break;
@@ -150,15 +184,18 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
     }
   };
 
-  const hazBtn = (l) => {
+  // Значки состояния локации для карты. Фишки опасностей с артом — как {type}
+  // (рисуются ассетом-<image>), остальные метки (повреждение, люк, блокировка
+  // терминала) — как {emoji}: ассетов для них не давали.
+  const hazIcons = (l) => {
     const L = G.board[l];
-    const chips = [];
-    for (const h of ['fire', 'hypoxia', 'darkness', 'spy']) if (L.hazards[h]) chips.push(HAZARD_ICON[h]);
-    if (L.computerLocked) chips.push(HAZARD_ICON.lockdown);
-    if (L.terminalLocked) chips.push('⛔');
-    if (L.damage) chips.push('💥');
-    if (L.hatchClosed) chips.push('🚪');
-    return chips.join(' ');
+    const out = [];
+    for (const h of ['fire', 'hypoxia', 'darkness', 'spy']) if (L.hazards[h]) out.push({ type: h });
+    if (L.computerLocked) out.push({ type: 'lockdown', label: 'блокировка компьютера' });
+    if (L.terminalLocked) out.push({ emoji: '⛔', label: 'блокировка терминала' });
+    if (L.damage) out.push({ emoji: '💥', label: 'повреждение' });
+    if (L.hatchClosed) out.push({ emoji: '🚪', label: 'люк закрыт' });
+    return out;
   };
 
   // ---------- SVG-карта ----------
@@ -207,40 +244,117 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
 
   const cubesLeft = (k) => myP?.plan ? myP.plan[k] - myP.plan.spent[k] : 0;
 
-  // Кнопка спец. действия. Цену и доступность считает движок (specialPlan) —
-  // тем же кодом, которым он потом проверит ход. Раньше кнопка была всегда
-  // нажимаемой: не хватало кубика из-за тьмы или «вредоносной программы» —
-  // ход молча отклонялся, и игрок не понимал, что произошло.
+  // Расшифровка цены для тултипа: «3 базовых + 1 тьма», а если кубиков не
+  // хватает — сколько нужно и сколько есть. Модификаторы приходят из движковой
+  // actionCost, поэтому подпись и списание не расходятся.
+  const costTip = (c) => c.modifiers.map(m => `${m.n} ${COST_MOD_NAMES[m.key] || m.key}`).join(' + ')
+    + (c.can ? '' : ` · нужно кубиков: ${c.need}, есть ${c.have}`);
+
+  // Кнопка обычного действия (движение/поиск/активация/дверь). Цену и
+  // доступность считает движковая actionCost — тем же кодом, которым он потом
+  // спишет кубики. На кнопке — общее число кубиков, в тултипе — из чего оно
+  // сложилось. Раньше эти кнопки цену не показывали и доплату за тьму не
+  // считали: кнопка нажималась, ход молча отклонялся.
+  const actBtn = (action, label, onClick, extraDisabled = false) => {
+    const c = actionCost(G, me, action);
+    return <button disabled={extraDisabled || !c.can} title={costTip(c)} onClick={onClick}>
+      {label} <b className="price">{c.need}⬛</b></button>;
+  };
+
+  // Кнопка спец. действия. Цену и доступность считает движок (actionCost) —
+  // тем же кодом, которым он потом проверит ход. На кнопке общее число кубиков
+  // («4⬛»), в тултипе расшифровка («3 базовых + 1 тьма»); рискованный вариант
+  // добавляет к цене значок кубика. Недоступная кнопка в тултипе называет,
+  // чего не хватает.
   const specialBtn = (label, mkSel, opts = {}) => {
     const cheap = CHARACTERS[myP.character].special === 'cheap_special';
     const row = (risky) => {
-      const p = specialPlan(G, me, { risky });
-      const blocked = opts.why || (p.can ? null : `нужно кубиков: ${p.need}, есть ${p.have}`);
-      const label = `${p.cost}⬛${p.tax ? ` +${p.tax}` : ''}${risky ? '+🎲' : ''}`;
-      const title = (p.tax ? `доплата ${p.tax} за тьму / «вредоносную программу». ` : '')
-        + (blocked ? `Недоступно: ${blocked}` : (risky ? '2 кубика + проверка духа' : 'без проверки духа'));
+      const c = actionCost(G, me, 'special', { risky });
+      const blocked = opts.why || (c.can ? null : `нужно кубиков: ${c.need}, есть ${c.have}`);
+      const price = `${c.need}⬛${risky ? '+🎲' : ''}`;
+      const title = costTip(c) + (opts.why ? ` · недоступно: ${opts.why}`
+        : (risky ? ' · рискованный: 2 кубика + проверка духа' : ' · без проверки духа'));
       return <button key={risky ? 'r' : 'n'} disabled={!!blocked} title={title}
-        onClick={() => mkSel(risky)}>{label}</button>;
+        onClick={() => mkSel(risky)}>{price}</button>;
     };
     return (
-      <div className="specialrow" key={label}>
-        <span>{label}</span>
+      <div className="specialrow" key={opts.key || label}>
+        <span>{opts.icon && <ItemCard id={opts.icon} size="thumb" className="rowicon" />}{label}</span>
         <span>{row(false)}{!cheap && row(true)}</span>
       </div>
     );
   };
 
-  // «Убрать фишку» — цели считает движок. Если цель одна (а так почти всегда:
-  // игрок стоит на самой фишке), делаем сразу, без похода на карту.
+  // «Убрать фишку» — цель считает движок. Снять опасность можно только в своей
+  // локации (решение владельца), поэтому цель всегда одна (или ни одной) —
+  // действие выполняется сразу, без похода на карту.
   const clearHazardBtn = (h) => {
-    const targets = clearHazardTargets(G, me, h);
+    const targets = clearHazardTargets(G, me, h);   // только своя локация
     const why = computerBlockedWhy(G, me)
-      || (targets.length ? null : `рядом нет фишки «${HAZARD_NAMES[h]}»`);
-    return specialBtn(`Убрать «${HAZARD_NAMES[h]}»${targets.length ? ` · лок. ${targets.join(', ')}` : ''}`,
-      (risky) => {
-        if (targets.length === 1) moves.actSpecial({ kind: 'clearHazard', hazard: h, loc: targets[0], risky });
-        else setSel({ kind: 'clearHazard', hazard: h, risky, targets });
-      }, { why });
+      || (targets.length ? null : `здесь нет фишки «${HAZARD_NAMES[h]}»`);
+    return specialBtn(`Убрать «${HAZARD_NAMES[h]}»${targets.length ? ` · лок. ${targets[0]}` : ''}`,
+      (risky) => moves.actSpecial({ kind: 'clearHazard', hazard: h, loc: targets[0], risky }),
+      { why });
+  };
+
+  // Постоянная панель инвентаря — всегда под рукой, во всех фазах. Действия с
+  // предметами (активация, батарея, дрон) работают только когда идёт твой ход в
+  // фазе действий; в остальное время панель информационная.
+  const renderInventory = () => {
+    const P = myP;
+    if (!P) return null;
+    const interactive = active && !P.dead && G.phase === 'actions';
+    return (
+      <div className="panel invpanel">
+        <h3>Инвентарь ({P.inventory.length}/{4 - P.invBlocked})</h3>
+        {!interactive && <p className="hint">Действия с предметами — в свой ход в фазе действий.</p>}
+        <div className="inv">
+          {P.inventory.length === 0 && <p className="hint">Пусто.</p>}
+          {/* Свой инвентарь известен мне: показываю карточки лицом (миниатюра;
+              полная — по ховеру). Заряд и «раскрыт» — значками поверх. */}
+          {P.inventory.map((it, i) => (
+            <div className="item" key={i}>
+              <ItemCard id={it.id} size="thumb" popover
+                charge={it.faceUp && it.charge != null ? it.charge : null}
+                delivered={!!it.faceUp} />
+              {interactive && !it.faceUp && ITEMS[it.id]?.kind !== 'key' &&
+                actBtn('activate', 'Активировать', () => moves.actActivate(i))}
+            </div>
+          ))}
+          {interactive && P.inventory.some(it => it.id === 'battery' && it.faceUp && it.charge > 0) && <>
+            <button onClick={() => moves.useBattery('computer')}>🔋 Батарея: снять блокировку компьютера</button>
+            <button onClick={() => moves.useBattery('terminal')}>🔋 Батарея: снять блокировку терминала</button>
+            {G.alarmOff.includes(P.pos) && <button onClick={() => moves.useBattery('alarmFix')}>🔋 Батарея: починить терминал тревоги</button>}
+          </>}
+          {interactive && P.inventory.some(it => it.id === 'drone' && it.faceUp && it.charge > 0) &&
+            <button onClick={() => setSel({ kind: 'droneLook' })}>🛸 Дрон: посмотреть предмет → клик по локации</button>}
+        </div>
+      </div>
+    );
+  };
+
+  // Разведка: что игрок знает о содержимом локаций — сюда ложится результат
+  // дрона (осмотр удалённой локации) и память об обысканных. knownItems есть
+  // только у своего игрока (playerView вырезает чужое), утечки нет.
+  const renderScouted = () => {
+    const P = myP;
+    const entries = Object.entries(P?.knownItems || {}).filter(([, ids]) => ids && ids.length);
+    if (!entries.length) return null;
+    return (
+      <div className="panel scouted">
+        <h3>Разведка · предметы</h3>
+        <p className="hint">Что вы знаете о содержимом локаций (поиск и дрон слежения).</p>
+        <div className="scoutlist">
+          {entries.map(([loc, ids]) => (
+            <div key={loc} className="scoutloc">
+              <b>Лок. {loc}</b>
+              <span className="foundcards">{ids.map((id, i) =>
+                <ItemCard key={i} id={id} size="thumb" popover />)}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
   };
 
   // Долг по сбросу может свалиться и на неактивного игрока: например, ему
@@ -282,8 +396,10 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
         {P.pendingLabPick && <div className="picker">
           <p>Выберите предмет из лаборатории (тайно):</p>
           {/* состав приходит массивом только тому, кто сейчас выбирает */}
-          {Array.isArray(G.labStack) && G.labStack.map((id, i) =>
-            <button key={i} onClick={() => moves.pickLab(id)}>{ITEMS[id].name}</button>)}
+          <div className="foundcards">
+            {Array.isArray(G.labStack) && G.labStack.map((id, i) =>
+              <ItemCard key={i} id={id} size="thumb" popover className="pickable" onClick={() => moves.pickLab(id)} />)}
+          </div>
         </div>}
         {P.pendingDrop > 0 && <div className="picker">
           <p className="error">Перегруз: сбросьте {P.pendingDrop} предмет(а). Пока не сбросите, ход не продолжится.</p>
@@ -297,7 +413,7 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
         </div>}
 
         <div className="btns">
-          <button disabled={cubesLeft('move') + P.bonusCubes < 1} onClick={() => setSel({ kind: 'move' })}>🚶 Движение → клик по локации</button>
+          {actBtn('move', '🚶 Движение → клик по локации', () => setSel({ kind: 'move' }))}
           {!P.inSpace && HATCHES[P.pos] && HATCHES[P.pos].map(s =>
             <button key={s} onClick={() => moves.actMove(s)}>🛰 В космос → {SPACE_NAMES[s]}</button>)}
           {P.inSpace && <>
@@ -306,56 +422,43 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
             {Object.entries(HATCHES).filter(([, ss]) => ss.includes(P.inSpace)).map(([l]) =>
               <button key={l} onClick={() => moves.actMove(+l)}>🛬 Вернуться в локацию {l}</button>)}
           </>}
-          <button disabled={cubesLeft('search') + P.bonusCubes < 1 || P.inSpace || P.pendingTake === P.pos}
-            onClick={() => moves.actSearch(false)}>🔍 Поиск (осмотреть локацию)</button>
+          {actBtn('search', '🔍 Поиск (осмотреть локацию)', () => moves.actSearch(false),
+            !!P.inSpace || P.pendingTake === P.pos)}
         </div>
 
         {/* Что лежит в локации: пока не обыскали — «▩», после осмотра — имена.
             Раньше результат поиска был виден только по подписи кнопки «забрать»
             и мелким буквам на схеме, и его легко было не заметить. */}
-        {!P.inSpace && P.pendingTake !== P.pos && <p className="found">
+        {!P.inSpace && P.pendingTake !== P.pos && <div className="found">
           {G.board[P.pos].items.length === 0
             ? 'В этой локации ничего не лежит.'
-            : <>Здесь лежит: {G.board[P.pos].items.map((it, i) =>
-              <b key={i}>{i > 0 ? ', ' : ''}{it.faceUp || it.known ? (ITEMS[it.id]?.name ?? '?') : '▩ не осмотрено'}</b>)}</>}
-        </p>}
+            : <>Здесь лежит: <span className="foundcards">{G.board[P.pos].items.map((it, i) =>
+              // осмотренное/известное — карточкой, неосмотренное — рубашкой
+              <ItemCard key={i} id={it.faceUp || it.known ? it.id : 'hidden'} size="thumb" popover />)}</span></>}
+        </div>}
 
         {/* Осмотр и взятие — одно действие поиска: кубик уже потрачен, и
-            решение «брать или оставить» ничего больше не стоит. */}
+            решение «брать или оставить» ничего больше не стоит. Найденное —
+            полными карточками; в стопке из нескольких они идут рядом. */}
         {!P.inSpace && P.pendingTake === P.pos && <div className="picker">
-          <p>Осмотрели локацию {P.pos}. Забрать предмет? Кубик уже потрачен — решение входит в то же действие.</p>
-          {G.board[P.pos].items.map((it, i) =>
-            <button key={i} onClick={() => moves.actSearch(i)}>Взять: {ITEMS[it.id]?.name || '???'}</button>)}
+          <p>Осмотрели локацию {P.pos}. Забрать предмет? Кубик уже потрачен — решение входит в то же действие. Нажмите на карточку, чтобы взять.</p>
+          <div className="foundcards full">
+            {G.board[P.pos].items.map((it, i) =>
+              <ItemCard key={i} id={it.id} size="full" className="pickable" onClick={() => moves.actSearch(i)} />)}
+          </div>
           <button onClick={() => moves.leaveItem()}>Оставить на месте</button>
         </div>}
 
         <div className="btns">
-          <button disabled={cubesLeft('door') + P.bonusCubes < 1} onClick={() => setSel({ kind: 'openDoor' })}>🚪 Открыть дверь → клик по соседней локации</button>
+          {actBtn('door', '🚪 Открыть дверь → клик по соседней локации', () => setSel({ kind: 'openDoor' }))}
         </div>
 
-        <h4>Инвентарь ({P.inventory.length}/{4 - P.invBlocked})</h4>
-        <div className="inv">
-          {P.inventory.map((it, i) => (
-            <div className="item" key={i}>
-              <span>{ITEMS[it.id]?.name || '???'}{it.faceUp && it.charge != null ? ` ⚡${it.charge}` : ''}{it.faceUp ? ' ✓' : ''}</span>
-              {!it.faceUp && ITEMS[it.id]?.kind !== 'key' &&
-                <button disabled={cubesLeft('activate') + P.bonusCubes < 1} onClick={() => moves.actActivate(i)}>Активировать</button>}
-              {here.length > 0 && here.map(([pid, p]) =>
-                <button key={pid} onClick={() => moves.giveItem(pid, i)}>→ {CHARACTERS[p.character].name}</button>)}
-            </div>
-          ))}
-          {P.inventory.some(it => it.id === 'battery' && it.faceUp && it.charge > 0) && <>
-            <button onClick={() => moves.useBattery('computer')}>🔋 Батарея: снять блокировку компьютера</button>
-            <button onClick={() => moves.useBattery('terminal')}>🔋 Батарея: снять блокировку терминала</button>
-            {G.alarmOff.includes(P.pos) && <button onClick={() => moves.useBattery('alarmFix')}>🔋 Батарея: починить терминал тревоги</button>}
-          </>}
-          {P.inventory.some(it => it.id === 'drone' && it.faceUp && it.charge > 0) &&
-            <button onClick={() => setSel({ kind: 'droneLook' })}>🛸 Дрон: посмотреть предмет → клик по локации</button>}
-        </div>
-
+        {/* Сам инвентарь — в постоянной панели сайдбара (renderInventory),
+            видной во всех фазах. Здесь остаются только действия фазы действий. */}
         <h4>Специальное действие</h4>
-        {P.inventory.filter(it => ITEMS[it.id]?.kind === 'key').map((it) =>
-          specialBtn(`Доставить: ${ITEMS[it.id].name}`, (risky) => moves.actSpecial({ kind: 'deliver', itemId: it.id, risky })))}
+        {P.inventory.filter(it => ITEMS[it.id]?.kind === 'key').map((it, i) =>
+          specialBtn(`Доставить: ${ITEMS[it.id].name}`, (risky) => moves.actSpecial({ kind: 'deliver', itemId: it.id, risky }),
+            { icon: it.id, key: `deliver:${it.id}:${i}` }))}
         {!P.inSpace && ['spy', 'hypoxia', 'darkness'].map(h => clearHazardBtn(h))}
         {term === 'medical' && specialBtn('Мед. терминал: вылечить все раны', (risky) => moves.actSpecial({ kind: 'terminal', risky }))}
         {term === 'command' && specialBtn('Командный: точка невозврата −1', (risky) => moves.actSpecial({ kind: 'terminal', risky }))}
@@ -369,11 +472,15 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
         {term === 'delivery' && Object.entries(G.players).filter(([pid, p]) => pid !== me && !p.dead && !p.inSpace).map(([pid, p]) => <React.Fragment key={pid}>
           {P.inventory.map((it, i) =>
             specialBtn(`Доставка: «${ITEMS[it.id]?.name}» → ${CHARACTERS[p.character].name}`,
-              (risky) => moves.actSpecial({ kind: 'terminal', targetPid: pid, invIndex: i, direction: 'give', risky })))}
-          {/* «Забрать» требует согласия владельца — по правилам оно даётся голосом */}
+              (risky) => moves.actSpecial({ kind: 'terminal', targetPid: pid, invIndex: i, direction: 'give', risky }),
+              { icon: it.id, key: `give:${pid}:${i}` }))}
+          {/* «Забрать» требует согласия владельца — по правилам оно даётся голосом.
+              Чужой скрытый предмет приходит как 'hidden' — ItemCard рисует его
+              рубашкой, название не утекает. */}
           {p.inventory.map((it, i) =>
             specialBtn(`Доставка: забрать «${it.id === 'hidden' ? 'предмет ' + (i + 1) : ITEMS[it.id]?.name}» у ${CHARACTERS[p.character].name} (с согласия)`,
-              (risky) => moves.actSpecial({ kind: 'terminal', targetPid: pid, invIndex: i, direction: 'take', consented: true, risky })))}
+              (risky) => moves.actSpecial({ kind: 'terminal', targetPid: pid, invIndex: i, direction: 'take', consented: true, risky }),
+              { icon: it.id, key: `take:${pid}:${i}` }))}
         </React.Fragment>)}
         {isAlarm && specialBtn('⏰ Терминал тревоги: отменить след. событие', (risky) => moves.actSpecial({ kind: 'terminal', alarm: true, risky }))}
         {!P.inSpace && G.board[P.pos].hatchClosed && specialBtn('Открыть люк здесь', (risky) => moves.actSpecial({ kind: 'openHatch', risky }))}
@@ -415,9 +522,10 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
     return (
       <div className="panel adel">
         <h3>АДЕЛЬ</h3>
-        {/* Рука открыта всем: экипаж видит те же карты, что и АДЕЛЬ. Играть
-            ими, разумеется, может только она — у остальных это просто список. */}
-        <h4>Рука АДЕЛЬ ({A.hand.length}/{ADEL_HAND_LIMIT})</h4>
+        {/* Рука закрыта от экипажа (решение владельца): playerView отдаёт
+            рубашки, счёт карт при этом виден. Карты рисует сама АДЕЛЬ; экипажу
+            приходят закрытые карты, и CardLabel рисует их рубашкой. */}
+        <h4>Рука АДЕЛЬ ({A.hand.length}/{ADEL_HAND_LIMIT}){!isAdel && ' · закрыта'}</h4>
         {/* Ключ — по номеру в руке, а не по id карты: закрытые карты приходят
             с одинаковым id, и React склеивал их в одну строку месива. */}
         <div className="btns">
@@ -496,6 +604,36 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
           {A.spyNotes.map((n, i) => <p key={i}>Ход {n.turn}: «{ITEMS[n.slot].name}» → {n.value === 'X' ? '✖ (возможно, пустышка)' : `локация ${n.value}`}</p>)}
         </div>}
 
+        {/* Под наблюдением: фишка шпионажа даёт АДЕЛЬ видеть предметы в локации
+            в любой момент и инвентарь члена экипажа, попавшего туда. Данные уже
+            раскрыты в playerView (spyVision) — здесь только показ. */}
+        {(() => {
+          const watched = [];
+          for (let l = 1; l <= 20; l++) {
+            if (!G.board[l]?.hazards.spy) continue;
+            const items = G.board[l].items.filter(it => it.faceUp || it.known);
+            const crew = Object.entries(G.players).filter(([, p]) => !p.inSpace && !p.dead && p.pos === l);
+            if (!items.length && !crew.length) continue;
+            watched.push({ loc: l, items, crew });
+          }
+          if (!watched.length) return null;
+          return <>
+            <h4>Под наблюдением (шпионаж)</h4>
+            <div className="watchlist">
+              {watched.map(w => <div key={w.loc} className="watchloc">
+                <b>Локация {w.loc}</b>
+                {w.items.length > 0 && <span className="watchitems"> · предметы: {w.items.map((it, i) =>
+                  <ItemCard key={i} id={it.id} size="thumb" popover />)}</span>}
+                {w.crew.map(([pid, p]) => <div key={pid} className="watchinv">
+                  👁 {CHARACTERS[p.character].name}: {p.inventory.length
+                    ? p.inventory.map((it, i) => <ItemCard key={i} id={it.id} size="thumb" popover />)
+                    : 'инвентарь пуст'}
+                </div>)}
+              </div>)}
+            </div>
+          </>;
+        })()}
+
         {phaseAdel && <button className="primary finish" onClick={() => { moves.adelEndPhase(); setSel(null); }}>
           Завершить фазу АДЕЛЬ (добор + энергия)
         </button>}
@@ -528,12 +666,15 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
       <div className="panel missions">
         <h3>Миссии</h3>
         <div className="mrow">
+          {/* Финальный предмет миссии — карточкой прямо в шапке (топор/шлем). */}
           <span className={'mtag blue' + (blueLeft === 0 && damage === 0 ? ' ready' : '')}>
+            <ItemCard id="axe" size="thumb" className="mfinal" />
             СИНЯЯ · отключить АДЕЛЬ · финал: топор → лок. 20<br />
             осталось предметов: {blueLeft} · повреждений на корабле: {damage}
             {blueLeft === 0 && damage === 0 && ' · топор готов'}
           </span>
           <span className={'mtag red' + (redOut ? ' blocked' : (redLeft === 0 ? ' ready' : ''))}>
+            <ItemCard id="helmet" size="thumb" className="mfinal" />
             КРАСНАЯ · побег · финал: шлем → лок. 16<br />
             осталось предметов: {redLeft} · запас: {G.turnNo - G.pointOfNoReturn}
             {redOut ? ' · ЗАБЛОКИРОВАНА: точка невозврата пройдена' : (redLeft === 0 ? ' · шлем готов' : '')}
@@ -546,15 +687,22 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
             // Обводка — цвета той миссии, к которой относится предмет;
             // линза-сетчатка нужна обеим, поэтому у неё своя пометка.
             const mission = ITEMS[s].mission;
+            // Сам ПРЕДМЕТ маркера известен всем (в playerView скрывается только
+            // m.loc). Поэтому карточку предмета показываем всегда — не утекает
+            // ничего; скрыта лишь локация, о чём и говорит пометка.
             return <div key={s} className={`marker m-${mission}` + (m.revealed ? ' done' : '')}>
-              <b>{ITEMS[s].name}</b>
-              <span>{m.revealed ? `✅ доставлено (лок. ${m.loc})` : known ? `→ лок. ${m.loc} (видно вам)` : '▩ скрыто'}</span>
-              <i>{G.missions.viewers[s].map(v => CHARACTERS[G.players[v]?.character]?.name).join(', ')}</i>
+              <ItemCard id={s} size="thumb" delivered={m.revealed}
+                note={!m.revealed && !known ? '▩ локация скрыта' : null} />
+              <div className="minfo">
+                <b>{ITEMS[s].name}</b>
+                <span>{m.revealed ? `✅ доставлено (лок. ${m.loc})` : known ? `→ лок. ${m.loc} (видно вам)` : '▩ локация скрыта'}</span>
+                <i>{G.missions.viewers[s].map(v => CHARACTERS[G.players[v]?.character]?.name).join(', ')}</i>
+              </div>
             </div>;
           })}
         </div>
         <p className="hint">Ход: <b>{G.turnNo}</b> · Точка невозврата: <b>{G.pointOfNoReturn}</b>
-          {' '}(каждый ход сдвигается на 1, «Дрейф» — на 2)
+          {' '}(двигается только событием «Дрейф»; командный терминал — на 1 назад)
           {G.anomaliesActive.length > 0 && <> · Аномалии: {G.anomaliesActive.map(a => ANOMALIES[a].name).join(', ')}</>}</p>
       </div>
     );
@@ -618,21 +766,49 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
               const here = crewHere(+l);
               return (
                 <g key={l} transform={`translate(${x},${y})`} className="locg" onClick={() => clickLoc(+l)}>
-                  <rect width={BOX_W} height={BOX_H} rx="10" className="loc"
+                  <rect width={BOX_W} height={BOX_H} rx="12" className="loc"
                     style={{ stroke: SECTOR_TINT[SECTOR_OF[l]] }} />
-                  <text x="8" y="16" className="locnum">{l}</text>
-                  {TERMINALS[l] && <text x="8" y="30" className="term">{TERMINAL_NAMES[TERMINALS[l]].replace('Терминал ', 'T·').replace(' терминал', '')}</text>}
-                  {G.alarmTerminals.includes(+l) && <text x="60" y="16" className="alarm">⏰</text>}
-                  {L.items.length > 0 && <text x="8" y="46" className="itm">
-                    {L.items.map(it => it.faceUp || it.known ? (ITEMS[it.id]?.name ?? '?') : '▩').join(', ')}
-                    <title>{L.items.map(it => it.faceUp || it.known ? (ITEMS[it.id]?.name ?? '?') : 'неизвестный предмет').join(', ')}</title>
-                  </text>}
-                  <text x="8" y="62" className="hz">{hazBtn(l)}</text>
+                  <text x="11" y="26" className="locnum">{l}</text>
+                  {TERMINALS[l] && <text x="11" y="45" className="term">{TERMINAL_NAMES[TERMINALS[l]].replace('Терминал ', 'T·').replace(' терминал', '')}</text>}
+                  {G.alarmTerminals.includes(+l) && <text x="88" y="26" className="alarm">⏰</text>}
+                  {/* Названия предметов: короткие — как есть, длинные («Ящик с
+                      инструментами») ужимаются по ширине коробки, чтобы не
+                      вылезать за край; полное имя всегда есть в подсказке. */}
+                  {L.items.length > 0 && (() => {
+                    const names = L.items.map(it => it.faceUp || it.known ? (ITEMS[it.id]?.name ?? '?') : '▩').join(', ');
+                    const full = L.items.map(it => it.faceUp || it.known ? (ITEMS[it.id]?.name ?? '?') : 'неизвестный предмет').join(', ');
+                    const long = names.length > 12;
+                    return <text x="11" y="68" className="itm"
+                      {...(long ? { textLength: BOX_W - 20, lengthAdjust: 'spacingAndGlyphs' } : {})}>
+                      {names}<title>{full}</title>
+                    </text>;
+                  })()}
+                  {/* Фишки опасностей — ассетами через SVG <image>; метки без
+                      арта (повреждение, люк, ⛔) — эмодзи-текстом. */}
+                  {/* Значки — компактной полосой у нижнего края слева; фишки
+                      экипажа рисуются ниже по разметке и ложатся поверх, поэтому
+                      остаются читаемыми даже если значков в локации много. */}
+                  {(() => {
+                    const icons = hazIcons(+l);
+                    const S = 15, gap = 2, yTop = BOX_H - S - 1;
+                    return icons.map((ic, i) => {
+                      const x = 6 + i * (S + gap);
+                      const src = ic.type ? chipSrc(ic.type) : null;
+                      if (src) return (
+                        <image key={i} href={src} x={x} y={yTop} width={S} height={S} className="hzchip">
+                          <title>{ic.label || HAZARD_NAMES[ic.type]}</title>
+                        </image>);
+                      return (
+                        <text key={i} x={x} y={BOX_H - 5} className="hz small">
+                          {ic.emoji || HAZARD_ICON[ic.type]}<title>{ic.label || HAZARD_NAMES[ic.type]}</title>
+                        </text>);
+                    });
+                  })()}
                   {here.map(([pid, p], i) =>
-                    <circle key={pid} cx={74 - i * 14} cy="56" r="7" className={'pawn c' + pid}>
+                    <circle key={pid} cx={96 - i * 20} cy="76" r="11" className={'pawn c' + pid}>
                       <title>{CHARACTERS[p.character].name}</title>
                     </circle>)}
-                  {HATCHES[l] && <text x="70" y="34" className="hatch" title="люк">◨</text>}
+                  {HATCHES[l] && <text x="92" y="48" className="hatch" title="люк">◨</text>}
                 </g>
               );
             })}
@@ -642,6 +818,16 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
               const who = Object.entries(G.players).filter(([, p]) => p.inSpace === s && !p.dead);
               return <span key={s} className="ssec">{SPACE_NAMES[s]}{who.map(([pid, p]) => <b key={pid}> · {CHARACTERS[p.character].name}</b>)}</span>;
             })}
+          </div>
+
+          {/* Легенда «что есть что»: фишка + название, чтобы новым игрокам не
+              гадать, что за значок на карте и в ячейках консоли. */}
+          <div className="legend">
+            {HAZARDS.map(h => (
+              <span key={h} className="legitem" title={HAZARD_NAMES[h]}>
+                <ChipIcon type={h} /><span>{HAZARD_NAMES[h]}</span>
+              </span>
+            ))}
           </div>
 
           {/* Консоль — под картой и на всю ширину, как планшет на столе. Она
@@ -655,7 +841,7 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
           {G.winner && <div className="panel winner">{G.winner === 'crew' ? '🎉 Экипаж побеждает!' : '🤖 АДЕЛЬ побеждает.'}</div>}
           {/* Отдельной панели «мой персонаж» нет: имя, дух и шкала ран уже есть
               в списке экипажа, а вторая копия только занимала место. */}
-          <CrewRoster G={G} me={me} />
+          <CrewRoster G={G} me={me} nickOf={nickOf} />
           {renderPhase()}
           {/* myP отсутствует у наблюдателя и при чужом playerID — без проверки
               весь экран падал бы на первом же обращении к полям игрока */}
@@ -663,8 +849,12 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
           {!isAdel && !G.winner && myP && !myP.dead && myP.pendingDrop > 0 && !active && renderDropOnly()}
           {!isAdel && !G.winner && myP && !myP.dead && G.phase === 'planning' && renderPlanning()}
           {!isAdel && !G.winner && myP && !myP.dead && G.phase === 'actions' && renderActions()}
-          {/* Панель АДЕЛЬ видят все: её рука открыта. Пульт внутри —
-              только для неё самой. */}
+          {/* Постоянная панель инвентаря: видна во всех фазах, в свой ход —
+              с рабочими кнопками, иначе информационная. */}
+          {!isAdel && myP && renderInventory()}
+          {!isAdel && myP && !myP.dead && renderScouted()}
+          {/* Панель АДЕЛЬ видят все: рука закрыта (виден только счёт), пульт
+              внутри — только для самой АДЕЛЬ. */}
           {renderAdel()}
           {renderMissions()}
           {!isAdel && G.privateLog?.length > 0 && <div className="panel log private">
@@ -673,7 +863,8 @@ export function Board({ G, ctx, moves: rawMoves, playerID }) {
           </div>}
           <div className="panel log">
             <h3>Журнал</h3>
-            <div className="logbody">{[...G.log].reverse().map((l, i) => <p key={i}>{l}</p>)}</div>
+            {/* Ник из лобби подставляется у первого упоминания персонажа в ходе. */}
+            <div className="logbody">{annotateLog(G.log, G.players, nickOf).slice().reverse().map((l, i) => <p key={i}>{l}</p>)}</div>
           </div>
           {msg && <div className="toast">{msg}</div>}
         </div>

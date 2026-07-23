@@ -39,7 +39,9 @@ export function HealthTrack({ character, health, dead }) {
 }
 
 // Список экипажа со шкалами. Видят все: и напарники, и АДЕЛЬ, и зритель.
-export function CrewRoster({ G, me }) {
+// nickOf(pid) — ник игрока из лобби (или null): показывается рядом с именем
+// персонажа. Без него (наблюдатель, реконнект) — просто имя персонажа.
+export function CrewRoster({ G, me, nickOf = () => null }) {
   const crew = Object.entries(G.players);
   if (!crew.length) return null;
   return (
@@ -47,12 +49,14 @@ export function CrewRoster({ G, me }) {
       <h3>Экипаж · здоровье</h3>
       {crew.map(([pid, p]) => {
         const ch = CHARACTERS[p.character];
+        const nick = nickOf(pid);
         return (
           <div key={pid} className={'crewrow' + (pid === me ? ' mine' : '') + (p.dead ? ' dead' : '')}>
             {/* Дух в скобках прямо у имени: порог проверки виден, не заглядывая
                 в планшет персонажа, и сразу понятно, кому пожар страшнее. */}
             <span className="cname">
               <i className={'pawndot c' + pid} />{ch?.name || '???'}
+              {nick && <span className="pnick"> · {nick}</span>}
               {ch && <b className="cspirit" title={`Дух ${ch.spirit} — порог проверки духа`}>({ch.spirit})</b>}
               {/* Своё положение подписываем словами: у остальных оно и так
                   видно фишкой на карте, а себя искать глазами неудобно. */}

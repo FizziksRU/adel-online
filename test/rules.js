@@ -1,7 +1,7 @@
 // Проверки отдельных правил. В отличие от smoke.js движок здесь вызывается
 // напрямую, без boardgame.io: так можно выставить нужное состояние поля
 // (повреждение, батарею, конкретный предмет) и проверить одно правило точечно.
-import { Adel, __testing } from '../src/game/index.js';
+import { Adel, __testing, clearHazardTargets } from '../src/game/index.js';
 import {
   SECTORS, HAZARDS, HAZARD_NAMES, BAG_COUNTS, CONSOLE_LAYOUT, CONSOLE_ORDER,
   ANOMALIES, ANOMALY_COST, ITEMS, ITEM_COUNTS, LAB_STACK, CHARACTERS,
@@ -130,6 +130,23 @@ function endTurn(G, random = makeRandom()) {
   G.board[2].hazards.darkness = true;
   mv('actSpecial')({ G, playerID: pid, random: makeRandom() }, { kind: 'clearHazard', hazard: 'darkness', loc: 2 });
   assert(G.board[2].hazards.darkness === false, 'исправный компьютер убирает «тьму»');
+}
+{
+  // Снятие опасности — только в СВОЕЙ локации (решение владельца, отличается от
+  // буклета): вариант «соседняя через проём» удалён из движка.
+  const G = setupG();
+  const pid = pidOf(G, 'mei');
+  const P = readyForAction(G, pid);
+  P.pos = 2;
+  G.board[3].hazards.darkness = true;      // тьма в соседней локации (проём 2↔3)
+  const r = mv('actSpecial')({ G, playerID: pid, random: makeRandom() },
+    { kind: 'clearHazard', hazard: 'darkness', loc: 3 });
+  assert(r === 'INVALID_MOVE', 'соседнюю опасность через компьютер убрать нельзя');
+  assert(G.board[3].hazards.darkness === true, 'тьма в соседней локации осталась');
+  // и цели интерфейсу clearHazardTargets отдаёт только свою локацию
+  G.board[2].hazards.darkness = true;
+  const t = clearHazardTargets(G, pid, 'darkness');
+  assert(t.length === 1 && t[0] === 2, `цель — только своя локация, вышло ${JSON.stringify(t)}`);
 }
 
 // --- Батарея защищает локацию от новой блокировки, пока не разрядится ---

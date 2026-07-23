@@ -1,33 +1,38 @@
-// Значки фишек и жетонов — одна точка подмены на весь интерфейс.
+// Значки фишек опасности — одна точка подмены на весь интерфейс.
 //
-// Сейчас рисуются эмодзи. Когда придут ассеты, менять нужно ТОЛЬКО этот файл:
-// положить картинки в src/client/assets/ и вписать их в CHIP_ART — всё
-// остальное (консоль, карта корабля, панели) подставит их само, потому что
-// ходит сюда, а не берёт эмодзи напрямую.
+// Ассеты пришли: арты берутся из автогенерируемого манифеста
+// (src/client/assets/manifest.js). Где арта нет (id в MISSING) — рисуется
+// эмодзи из data.js, чтобы интерфейс не падал. Менять пути руками не нужно:
+// правится состав в ассеты/ и `npm run assets`.
 //
-// Про репозиторий: сюда идут только собственные иконки. Оригинальные арты и
-// сканы коробки в репозиторий не кладём.
+// Два контекста показа:
+//   • HTML (консоль АДЕЛЬ) — <ChipIcon>, отдаёт <img>/<span>;
+//   • SVG (карта корабля) — там нужен <image>, а не <img>, поэтому карта берёт
+//     URL напрямую через chipSrc() и рисует <image> сама.
 import React from 'react';
 import { HAZARD_ICON, HAZARD_NAMES } from '../game/data.js';
+import { CHIP_ART } from './assets/manifest.js';
 
-// Ключ — вид фишки, значение — импортированная картинка (URL после сборки).
-// Пример, когда ассеты появятся:
-//   import fire from './assets/fire.svg';
-//   export const CHIP_ART = { fire, ... };
-export const CHIP_ART = {
-  fire: null, hypoxia: null, darkness: null, lockdown: null, spy: null, door: null,
-};
+export { CHIP_ART };
 
-// Значок вида фишки. Пока в CHIP_ART пусто — рисуется эмодзи из data.js.
-export function ChipIcon({ type, className = '' }) {
-  const art = CHIP_ART[type];
+// URL арта фишки: which = 'chip' (крупный, для карты) | 'chipSmall' (мелкий,
+// для ячеек консоли). null, если арта нет — вызвавший откатится на эмодзи.
+export function chipSrc(type, which = 'chip') {
+  return CHIP_ART[type]?.[which] || null;
+}
+
+// Значок вида фишки для HTML. small — брать мелкий арт (ячейки консоли).
+// Нет арта → эмодзи из data.js.
+export function ChipIcon({ type, small = false, className = '' }) {
+  const src = chipSrc(type, small ? 'chipSmall' : 'chip');
   const cls = ('icon ' + className).trim();
-  return art
-    ? <img className={cls} src={art} alt={HAZARD_NAMES[type]} draggable="false" />
+  return src
+    ? <img className={cls} src={src} alt={HAZARD_NAMES[type]} draggable="false" />
     : <span className={cls} aria-hidden="true">{HAZARD_ICON[type]}</span>;
 }
 
-// Рубашка жетона аномалии: то же место подмены, отдельным ключом.
+// Рубашка жетона аномалии: отдельная точка подмены. Ассетов аномалий нам не
+// давали — остаётся своя рубашка «▩».
 export const ANOMALY_ART = { back: null };
 
 export function AnomalyBack({ className = '' }) {

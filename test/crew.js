@@ -1,7 +1,8 @@
-// Правила экипажа, сверенные с буклетом: тьма «включая вход и выход»,
-// огнетушитель, перегруз инвентаря с выбором предмета, показ маркеров только
-// при встрече, предел подглядываний АДЕЛЬ, стопка предметов в локации,
-// запас жетонов повреждений и состав партии на двух членов экипажа.
+// Правила экипажа, сверенные с буклетом: тьма — налог только внутри локации
+// (решение владельца, отличается от буклета), огнетушитель, перегруз инвентаря
+// с выбором предмета, показ маркеров только при встрече, предел подглядываний
+// АДЕЛЬ, стопка предметов в локации, запас жетонов повреждений и состав партии
+// на двух членов экипажа.
 import { Adel, redBlocked } from '../src/game/index.js';
 import {
   HAZARDS, CHARACTERS, DAMAGE_TOKENS, CREW_SIZES, MIN_TABLE, MAX_TABLE,
@@ -70,7 +71,9 @@ function endTurn(G, random = makeRandom()) {
 }
 
 // ============================================================
-// Тьма: «все действия в этой локации, включая вход и выход»
+// Тьма: налог только внутри локации (решение владельца, отличается от буклета).
+// +1 кубик стоят действия СТОЯ в тьме и движение ИЗ неё. ВХОД в тёмную локацию
+// снаружи — обычная цена, 1 кубик.
 // ============================================================
 {
   // выход из тёмной локации — один лишний кубик
@@ -84,7 +87,7 @@ function endTurn(G, random = makeRandom()) {
   assert(spent(P) === 2, `выход из тьмы стоит 2 кубика, потрачено ${spent(P)}`);
 }
 {
-  // вход в тёмную локацию — тоже лишний кубик
+  // вход в тёмную локацию снаружи — обычная цена, налога нет
   const G = setupG();
   const pid = pidOf(G, 'artem');
   const P = readyForAction(G, pid, { ...NO_CUBES, move: 4 });
@@ -92,10 +95,10 @@ function endTurn(G, random = makeRandom()) {
   G.board[3].hazards.darkness = true;
   mv('actMove')({ G, playerID: pid, random: makeRandom() }, 3);
   assert(P.pos === 3, 'игрок вошёл в тёмную локацию');
-  assert(spent(P) === 2, `вход во тьму стоит 2 кубика, потрачено ${spent(P)}`);
+  assert(spent(P) === 1, `вход во тьму — обычная цена 1 кубик, потрачено ${spent(P)}`);
 }
 {
-  // из тьмы во тьму — каждая фишка берёт своё
+  // из тьмы во тьму: выход из первой +1, вход во вторую без налога → всего 2
   const G = setupG();
   const pid = pidOf(G, 'artem');
   const P = readyForAction(G, pid, { ...NO_CUBES, move: 4 });
@@ -104,34 +107,44 @@ function endTurn(G, random = makeRandom()) {
   G.board[3].hazards.darkness = true;
   mv('actMove')({ G, playerID: pid, random: makeRandom() }, 3);
   assert(P.pos === 3, 'переход между двумя тёмными локациями состоялся');
-  assert(spent(P) === 3, `переход тьма→тьма стоит 3 кубика, потрачено ${spent(P)}`);
+  assert(spent(P) === 2, `переход тьма→тьма стоит 2 кубика (выход +1, вход без налога), потрачено ${spent(P)}`);
 }
 {
-  // одного кубика на движение во тьму не хватает
+  // одного кубика на ВЫХОД из тьмы не хватает (а на вход — хватило бы)
   const G = setupG();
   const pid = pidOf(G, 'artem');
   const P = readyForAction(G, pid, { ...NO_CUBES, move: 1 });
   P.pos = 2;
-  G.board[3].hazards.darkness = true;
+  G.board[2].hazards.darkness = true;   // стоим в тьме — выход стоит 2
   const r = mv('actMove')({ G, playerID: pid, random: makeRandom() }, 3);
-  assert(r === 'INVALID_MOVE', 'без лишнего кубика во тьму не войти');
+  assert(r === 'INVALID_MOVE', 'без лишнего кубика из тьмы не выйти');
   assert(P.pos === 2, 'игрок остался на месте');
 }
 {
-  // пожар в той же локации отменяет тьму
+  // одного кубика хватает на ВХОД в тьму — налога на входе нет
+  const G = setupG();
+  const pid = pidOf(G, 'artem');
+  const P = readyForAction(G, pid, { ...NO_CUBES, move: 1 });
+  P.pos = 2;
+  G.board[3].hazards.darkness = true;   // тьма только в цели
+  mv('actMove')({ G, playerID: pid, random: makeRandom() }, 3);
+  assert(P.pos === 3, 'на вход в тьму хватает одного кубика');
+  assert(spent(P) === 1, `вход во тьму стоит 1 кубик, потрачено ${spent(P)}`);
+}
+{
+  // пожар в локации, где СТОИТ игрок, отменяет тьму — выход не дорожает
   const G = setupG();
   const pid = pidOf(G, 'artem');
   const P = readyForAction(G, pid, { ...NO_CUBES, move: 4 });
   P.pos = 2;
   P.inventory = [];
-  G.board[3].hazards.darkness = true;
-  G.board[3].hazards.fire = true;
-  const rnd = makeRandom(); rnd.D6 = () => 1;   // проверка духа пройдена
-  mv('actMove')({ G, playerID: pid, random: rnd }, 3);
-  assert(spent(P) === 1, `при пожаре тьма не работает, потрачено ${spent(P)}`);
+  G.board[2].hazards.darkness = true;
+  G.board[2].hazards.fire = true;
+  mv('actMove')({ G, playerID: pid, random: makeRandom() }, 3);
+  assert(spent(P) === 1, `при пожаре в своей локации тьма не работает, потрачено ${spent(P)}`);
 }
 {
-  // фонарь снимает тьму и на входе, и на выходе
+  // фонарь снимает тьму — выход из тёмной локации не дорожает
   const G = setupG();
   const pid = pidOf(G, 'artem');
   const P = readyForAction(G, pid, { ...NO_CUBES, move: 4 });
@@ -141,6 +154,39 @@ function endTurn(G, random = makeRandom()) {
   G.board[3].hazards.darkness = true;
   mv('actMove')({ G, playerID: pid, random: makeRandom() }, 3);
   assert(spent(P) === 1, `с фонарём переход стоит 1 кубик, потрачено ${spent(P)}`);
+}
+
+// ============================================================
+// Передача предметов — только через терминал доставки (решение владельца,
+// отличается от буклета). Передачи при встрече в одной локации больше нет;
+// показ маркеров и предметов (shareInfo) остаётся.
+// ============================================================
+{
+  // giveItem удалён из движка: колокация предметы не передаёт
+  assert(!Adel.moves.giveItem, 'ход giveItem удалён — передачи при встрече нет');
+}
+{
+  // единственный способ передать — спец. действие на терминале доставки (лок. 5)
+  const G = setupG();
+  const [a, b] = Object.keys(G.players);
+  const Pa = readyForAction(G, a, { ...NO_CUBES, special: 4 });
+  Pa.pos = 5; Pa.inventory = [{ id: 'lens', faceUp: false }];
+  const Pb = G.players[b]; Pb.pos = 5; Pb.inSpace = null; Pb.inventory = [];
+  const r = mv('actSpecial')({ G, playerID: a, random: makeRandom() },
+    { kind: 'terminal', targetPid: b, invIndex: 0, direction: 'give' });
+  assert(r !== 'INVALID_MOVE', 'терминал доставки передаёт предмет');
+  assert(Pb.inventory.some(it => it.id === 'lens'), 'предмет у получателя');
+  assert(!Pa.inventory.some(it => it.id === 'lens'), 'предмет ушёл от отправителя');
+}
+{
+  // shareInfo при встрече по-прежнему работает — показ, а не передача
+  const G = setupG();
+  const [a, b] = Object.keys(G.players);
+  const Pa = readyForAction(G, a, { ...NO_CUBES, move: 4 });
+  Pa.pos = 7; const Pb = G.players[b]; Pb.pos = 7; Pb.inSpace = null;
+  const r = mv('shareInfo')({ G, playerID: a }, b, true);
+  assert(r !== 'INVALID_MOVE', 'показ маркеров/предметов при встрече остался');
+  assert(G.missions.shares[`${a}->${b}`] === 7, 'показ зафиксирован');
 }
 
 // ============================================================
@@ -494,8 +540,8 @@ function endTurn(G, random = makeRandom()) {
 // Точка невозврата и окно красной миссии
 // ============================================================
 {
-  // Точка невозврата подбирается к жетону хода каждый ход, а «Дрейф» на таком
-  // ходу сдвигает её сразу на два деления.
+  // Точка невозврата двигается ТОЛЬКО событием «Дрейф» (решение владельца,
+  // возврат к буклету): ежеходного сдвига больше нет.
   const G = setupG(3);
   assert(G.pointOfNoReturn === 1, 'партия начинается с первого деления');
   const turn0 = G.turnNo;
@@ -503,11 +549,16 @@ function endTurn(G, random = makeRandom()) {
   stackSilence(G, 6);
   endTurn(G);
   assert(G.turnNo === turn0 - 1, 'жетон хода сдвинулся на одно деление');
-  assert(G.pointOfNoReturn === 2, `обычный ход сдвигает точку на 1, стало ${G.pointOfNoReturn}`);
+  assert(G.pointOfNoReturn === 1, `обычный ход точку не двигает, осталось ${G.pointOfNoReturn}`);
 
   G.eventDeck.unshift({ id: 'drift', color: 'grey', uid: 900, cancelled: false });
   endTurn(G);
-  assert(G.pointOfNoReturn === 4, `на ходу с «Дрейфом» точка уходит на 2, стало ${G.pointOfNoReturn}`);
+  assert(G.pointOfNoReturn === 2, `«Дрейф» двигает точку на 1, стало ${G.pointOfNoReturn}`);
+
+  // Отменённый терминалом тревоги «Дрейф» точку не двигает.
+  G.eventDeck.unshift({ id: 'drift', color: 'grey', uid: 901, cancelled: true });
+  endTurn(G);
+  assert(G.pointOfNoReturn === 2, `отменённый «Дрейф» точку не двигает, осталось ${G.pointOfNoReturn}`);
 }
 {
   // Когда точка невозврата обгоняет жетон хода, красная миссия закрыта:

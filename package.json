@@ -7,8 +7,9 @@
     "dev:server": "node server.js",
     "dev:client": "vite",
     "build": "vite build",
+    "assets": "node scripts/prepare-assets.mjs",
     "start": "node server.js",
-    "test": "node test/smoke.js && node test/rules.js && node test/layout.js && node test/endings.js && node test/specials.js && node test/crew.js && node test/spirit.js && node test/playthrough.js && node test/ui.js"
+    "test": "node test/smoke.js && node test/rules.js && node test/layout.js && node test/endings.js && node test/specials.js && node test/crew.js && node test/spirit.js && node test/playthrough.js && node test/ui.js && node test/assets.js"
   },
   "dependencies": {
     "boardgame.io": "^0.50.2",
@@ -20,6 +21,7 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "concurrently": "^9.1.0",
+    "sharp": "^0.35.3",
     "vite": "^5.4.11"
   }
 }

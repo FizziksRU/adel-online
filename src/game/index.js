@@ -265,15 +265,13 @@ function darknessTax(G, pid) {
   const P = G.players[pid];
   return P.inSpace ? 0 : darkAt(G, pid, P.pos);
 }
-// Движение — тот случай, где правило говорит «включая вход и выход»: тьма
-// считается и там, откуда игрок уходит, и там, куда входит. Каждая фишка
-// действует сама по себе, поэтому переход между двумя тёмными локациями
-// стоит двух лишних кубиков.
-function moveTax(G, pid, dest) {
-  const P = G.players[pid];
-  const from = P.inSpace ? 0 : darkAt(G, pid, P.pos);
-  const to = typeof dest === 'number' ? darkAt(G, pid, dest) : 0;
-  return from + to;
+// Доплата за тьму при движении — часть единой стоимости действия (actionCost):
+// +1 за движение ИЗ тёмной локации, вход в тёмную — без налога (решение
+// владельца, отличается от буклета). Отдельное имя оставлено для читаемости
+// вызова в actMove; сам расчёт идёт через actionCost, чтобы цена на кнопке и
+// списание движком не разошлись.
+function moveTax(G, pid) {
+  return actionCost(G, pid, 'move').tax;
 }
 function spendCubes(G, pid, action, n, extraFromAny = 0) {
   const P = G.players[pid];
@@ -302,6 +300,43 @@ function canSpend(G, pid, action, n, extraFromAny = 0) {
   if (free(action) + P.bonusCubes < n) return false;
   const totalFree = CUBE_ACTIONS.reduce((s, k) => s + free(k), 0) + P.bonusCubes;
   return totalFree >= n + extraFromAny;
+}
+
+// Единая стоимость действия в кубиках: база + тьма + вредоносная программа +
+// способность Мэй. Один источник истины и для движка, и для интерфейса — ровно
+// как hazardCardRules. Раньше цену считал только specialPlan, и только для
+// спец. действия; движение/поиск/активация/дверь считали доплату за тьму каждый
+// у себя, а интерфейс не считал её вовсе — кнопка была нажимаема, ход молча
+// отклонялся. Теперь и то, и другое проходит здесь.
+//   cost — база, берётся из собственного пула действия;
+//   tax  — доплата (тьма и/или вредоносная программа), берётся с любого пула;
+//   need — cost + tax, столько кубиков спишется всего (это и есть цена на кнопке);
+//   modifiers — расшифровка для тултипа; have — сколько кубиков доступно;
+//   can — хватает ли их.
+export function actionCost(G, pid, action, opts = {}) {
+  const P = G.players[pid];
+  const ch = P && CHARACTERS[P.character];
+  // База: спец. действие — 3 кубика (Мэй — всегда 2; рискованный вариант — 2 +
+  // проверка духа); остальные действия — 1.
+  const cost = action === 'special'
+    ? (ch?.special === 'cheap_special' ? 2 : (opts.risky ? 2 : 3))
+    : 1;
+  const modifiers = [{ key: 'base', n: cost }];
+  // Тьма: +1 на действия стоя в тёмной локации и на движение из неё (в космосе
+  // тьмы нет). darkAt уже учитывает фонарь и отменяющий тьму пожар.
+  const dark = (P && !P.inSpace) ? darkAt(G, pid, P.pos) : 0;
+  if (dark) modifiers.push({ key: 'dark', n: dark });
+  // Вредоносная программа: +1 кубик только на спец. действие в этот ход.
+  const malware = (action === 'special' && G.eventOngoing === 'malware') ? 1 : 0;
+  if (malware) modifiers.push({ key: 'malware', n: malware });
+  const tax = dark + malware;
+  const has = !!(P && P.plan);
+  const free = has ? (k) => P.plan[k] - P.plan.spent[k] : () => 0;
+  const have = has ? CUBE_ACTIONS.reduce((s, k) => s + free(k), 0) + P.bonusCubes : 0;
+  return {
+    action, cost, tax, need: cost + tax, have, modifiers,
+    can: has && canSpend(G, pid, action, cost, tax),
+  };
 }
 
 // ---------- консоль АДЕЛЬ ----------
@@ -525,8 +560,9 @@ function runEventPhase(G, random) {
   log(G, `— ХОД ${G.turnNo}: событие «${EVENTS[card.id].name}»${cancelled ? ' (ОТМЕНЕНО терминалом тревоги)' : ''} —`);
   if (!cancelled) {
     if (card.id === 'stress' || card.id === 'malware') G.eventOngoing = card.id;
-    // «Дрейф» добавляет деление сверх обычного шага конца хода — в сумме
-    // на таком ходу точка невозврата уходит на два.
+    // «Дрейф» — единственное, что двигает точку невозврата (ежеходного сдвига
+    // больше нет). Отменённое терминалом тревоги событие сюда не попадает: весь
+    // блок под `if (!cancelled)`, поэтому отменённый «Дрейф» точку не двигает.
     if (card.id === 'drift') { G.pointOfNoReturn += 1; log(G, `Дрейф: точка невозврата → ${G.pointOfNoReturn}.`); }
     // Проверки не разыгрываются здесь же: они уходят в очередь, и каждый
     // бросает свой кубик сам. Порядок очереди — порядок игроков за столом.
@@ -636,11 +672,10 @@ function endTurnPhase(G, random) {
     } else bat.charge -= 1;
   }
   G.turnNo -= 1;
-  // Точка невозврата подбирается к жетону хода каждый ход. Они идут
-  // навстречу друг другу, поэтому окно красной миссии закрывается вдвое
-  // быстрее, чем кончается время: когда точка обгонит жетон хода, побег
-  // становится невозможен.
-  G.pointOfNoReturn += 1;
+  // Точка невозврата ежеходно НЕ двигается (решение владельца, возврат к
+  // буклету): она уходит на деление только событием «Дрейф» (в runEventPhase,
+  // и только если оно не отменено терминалом тревоги). Командный терминал
+  // отыгрывает деление назад. Побег снова запасной план, а не гонка.
   log(G, `Конец хода. Жетон хода → ${G.turnNo}, точка невозврата → ${G.pointOfNoReturn}.`);
   if (G.turnNo < 1) { G.winner = 'adel'; log(G, '⏱ Время вышло. АДЕЛЬ побеждает.'); return; }
   runEventPhase(G, random);
@@ -842,11 +877,12 @@ function applySpecial(G, random, playerID, payload) {
   }
 
   if (kind === 'clearHazard') {
-    // через компьютер: шпионаж/гипоксия/тьма в своей или соседней (через проём) локации
+    // через компьютер: шпионаж/гипоксия/тьма ТОЛЬКО в своей локации (решение
+    // владельца, отличается от буклета — вариант «соседняя через проём» удалён).
     if (!computerUsable(L)) return INVALID_MOVE;
     const t = payload.hazard, tl = payload.loc;
     if (!['spy', 'hypoxia', 'darkness'].includes(t)) return INVALID_MOVE;
-    const okLoc = tl === P.pos || ADJ[P.pos].includes(tl);
+    const okLoc = tl === P.pos;
     if (!okLoc || !loc(G, tl).hazards[t]) return INVALID_MOVE;
     loc(G, tl).hazards[t] = false;
     G.adel.chipDiscard.push(t);
@@ -1158,7 +1194,7 @@ const moves = {
   actMove: ({ G, playerID, random }, dest) => {
     if (!canAct(G, playerID)) return INVALID_MOVE;
     const P = G.players[playerID];
-    const tax = moveTax(G, playerID, dest);
+    const tax = moveTax(G, playerID);
     if (!canSpend(G, playerID, 'move', 1, tax)) return INVALID_MOVE;
     if (P.inSpace) {
       // движение в космосе: в соседнюю секцию или на корабль через люк
@@ -1223,8 +1259,8 @@ const moves = {
     // Поэтому взятие сразу после осмотра той же локации кубика уже не стоит,
     // иначе игрок платил бы дважды за одно действие правил.
     const alreadyLooked = P.pendingTake === P.pos;
-    const tax = darknessTax(G, playerID);
-    if (!alreadyLooked && !spendCubes(G, playerID, 'search', 1, tax)) return INVALID_MOVE;
+    const c = actionCost(G, playerID, 'search');
+    if (!alreadyLooked && !spendCubes(G, playerID, 'search', c.cost, c.tax)) return INVALID_MOVE;
     if (alreadyLooked && idx == null) return INVALID_MOVE; // осматривать нечего, уже осмотрено
     // Осмотр показывает всю стопку: предметов в локации может накопиться
     // сколько угодно, и «посмотреть только верхний» правилам не соответствует.
@@ -1282,20 +1318,20 @@ const moves = {
     if (!it || it.faceUp) return INVALID_MOVE;
     const item = ITEMS[it.id];
     if (item.kind === 'key') return INVALID_MOVE;
-    const tax = darknessTax(G, playerID);
+    const c = actionCost(G, playerID, 'activate');
 
     // детали: нужны две, активируются одним действием
     if (it.id === 'parts') {
       const partIdx = P.inventory.map((x, i) => (x.id === 'parts' && !x.faceUp ? i : -1)).filter(i => i >= 0);
       if (partIdx.length < 2) return INVALID_MOVE;
       if (!G.labStack.length) return INVALID_MOVE;
-      if (!spendCubes(G, playerID, 'activate', 1, tax)) return INVALID_MOVE;
+      if (!spendCubes(G, playerID, 'activate', c.cost, c.tax)) return INVALID_MOVE;
       P.inventory = P.inventory.filter((_, i) => !partIdx.slice(0, 2).includes(i));
       P.pendingLabPick = true; // выбор предмета отдельным ходом pickLab
       log(G, `${CHARACTERS[P.character].name} собирает предмет из деталей.`);
       return;
     }
-    if (!spendCubes(G, playerID, 'activate', 1, tax)) return INVALID_MOVE;
+    if (!spendCubes(G, playerID, 'activate', c.cost, c.tax)) return INVALID_MOVE;
     it.faceUp = true;
     if (item.kind === 'charged') {
       const roll = random.D6();
@@ -1360,8 +1396,8 @@ const moves = {
     const P = G.players[playerID];
     if (P.inSpace) return INVALID_MOVE;
     if (!doorBlocked(G, P.pos, neighbor)) return INVALID_MOVE;
-    const tax = darknessTax(G, playerID);
-    if (!spendCubes(G, playerID, 'door', 1, tax)) return INVALID_MOVE;
+    const c = actionCost(G, playerID, 'door');
+    if (!spendCubes(G, playerID, 'door', c.cost, c.tax)) return INVALID_MOVE;
     loc(G, P.pos).doors = loc(G, P.pos).doors.filter(d => d !== neighbor);
     loc(G, neighbor).doors = loc(G, neighbor).doors.filter(d => d !== P.pos);
     G.adel.chipDiscard.push('door');
@@ -1373,18 +1409,18 @@ const moves = {
     if (!canAct(G, playerID)) return INVALID_MOVE;
     const P = G.players[playerID];
     const ch = CHARACTERS[P.character];
-    const tax = (P.inSpace ? 0 : darknessTax(G, playerID)) + (G.eventOngoing === 'malware' ? 1 : 0);
-    // стоимость: 3 кубика; или 2 + проверка духа; Мэй — всегда 2 без проверки
-    let cost = 3, needCheck = false;
-    if (ch.special === 'cheap_special') { cost = 2; }
-    else if (payload.risky) { cost = 2; needCheck = true; }
-    if (!canSpend(G, playerID, 'special', cost, tax)) return INVALID_MOVE;
+    // Стоимость — из единой функции: 3 кубика; Мэй — всегда 2 без проверки;
+    // рискованный вариант — 2 + проверка духа. Плюс доплата за тьму и
+    // «вредоносную программу». Интерфейс показывает ровно это же число.
+    const c = actionCost(G, playerID, 'special', { risky: payload.risky });
+    const needCheck = payload.risky && ch.special !== 'cheap_special';
+    if (!canSpend(G, playerID, 'special', c.cost, c.tax)) return INVALID_MOVE;
     // Законность самого действия проверяем ДО списания кубиков и постановки
     // броска. Иначе rollSpirit пришлось бы отклонять уже после броска, а
     // отклонённый ход boardgame.io откатывает целиком — игрок остался бы
     // с непройденной проверкой и бросал бы её заново до бесконечности.
     if (needCheck && probeSpecial(G, playerID, payload) === INVALID_MOVE) return INVALID_MOVE;
-    if (!spendCubes(G, playerID, 'special', cost, tax)) return INVALID_MOVE;
+    if (!spendCubes(G, playerID, 'special', c.cost, c.tax)) return INVALID_MOVE;
     if (needCheck) {
       // Рискованный вариант — два шага: кубики уже потрачены, а эффект
       // наступит только после успешного броска (ход rollSpirit).
@@ -1428,18 +1464,10 @@ const moves = {
     log(G, `${CHARACTERS[P.character].name} направляет дрон в локацию ${targetLoc}.`);
   },
 
-  giveItem: ({ G, playerID }, targetPid, invIndex) => {
-    if (G.phase !== 'actions' || isAdel(playerID)) return INVALID_MOVE;
-    const P = G.players[playerID], T = G.players[targetPid];
-    if (!T || T.dead || P.dead) return INVALID_MOVE;
-    if (P.inSpace || T.inSpace || P.pos !== T.pos) return INVALID_MOVE;
-    const it = P.inventory[invIndex];
-    if (!it) return INVALID_MOVE;
-    P.inventory.splice(invIndex, 1);
-    T.inventory.push(it);
-    enforceCapacity(G, targetPid);
-    log(G, `${CHARACTERS[P.character].name} передаёт предмет ${CHARACTERS[T.character].name} (лицом вниз).`);
-  },
+  // Передача предметов при встрече в одной локации удалена (решение владельца,
+  // отличается от буклета): единственный способ передать предмет — спец.
+  // действие на терминале доставки (лок. 5, kind:'terminal' term:'delivery').
+  // Показ маркеров и предметов при встрече (shareInfo) остаётся.
 
   shareInfo: ({ G, playerID }, targetPid, on) => {
     // показать колокейтед-союзнику свои маркеры и предметы
@@ -1553,14 +1581,19 @@ function playerView({ G, playerID }) {
 
   // АДЕЛЬ: что от экипажа закрыто, а что нет.
   //
-  // Рука и жетоны аномалий ОТКРЫТЫ — решение владельца коробки: экипаж видит
-  // их так же, как сама АДЕЛЬ. Раньше и то, и другое пряталось; менять
-  // обратно — снимать эти две строки.
+  // РУКА АДЕЛЬ ЗАКРЫТА от экипажа (решение владельца, отличается от прежней
+  // трактовки): карты заменяются рубашками, но их ЧИСЛО видно — экипаж знает,
+  // сколько карт у АДЕЛЬ, но не какие. На проде рука «течёт» именно здесь:
+  // аргументы ходов идут отдельным каналом и уже вырезаны redact: true, а
+  // playerView раньше отдавал руку как есть. Жетоны АНОМАЛИЙ остаются открытыми
+  // (решение касается только карт).
   //
   // Закрытым остаётся то, что даёт знание наперёд: порядок колоды (иначе обе
   // стороны планируют на много ходов вперёд), состав сброса, состав мешочка и
   // заметки шпионажа — в последних лежат подсмотренные локации маркеров.
   if (!adel) {
+    // Рубашка вместо карты; длина массива = число карт на руке (счёт открыт).
+    V.adel.hand = G.adel.hand.map(() => ({ id: 'hidden' }));
     V.adel.deck = G.adel.deck.length;
     V.adel.discard = G.adel.discard.length;
     V.adel.bag = Object.values(G.adel.bag).reduce((a, b) => a + b, 0);
@@ -1593,34 +1626,19 @@ export const __testing = { consoleAddChip, consoleTopCost, consoleTakeChip };
 // потом проверит движок. Иначе интерфейс предлагает то, что будет отклонено.
 export { hazardCardRules, consoleFree };
 
-// Во что обойдётся спец. действие: своя цена, доплата за тьму и «вредоносную
-// программу», хватает ли кубиков. Открыто интерфейсу по той же причине, что и
-// правила карт: он обязан считать доступность тем же кодом, что и движок.
-// Без этого кнопка нажимается, ход молча отклоняется, и игрок не понимает,
-// чего ему не хватило.
-export function specialPlan(G, pid, { risky = false } = {}) {
-  const P = G.players[pid];
-  if (!P || !P.plan) return { cost: 0, tax: 0, need: 0, have: 0, can: false };
-  const ch = CHARACTERS[P.character];
-  const tax = (P.inSpace ? 0 : darknessTax(G, pid)) + (G.eventOngoing === 'malware' ? 1 : 0);
-  const cost = ch.special === 'cheap_special' ? 2 : (risky ? 2 : 3);
-  const free = (k) => P.plan[k] - P.plan.spent[k];
-  return {
-    cost, tax, need: cost + tax,
-    have: CUBE_ACTIONS.reduce((s, k) => s + free(k), 0) + P.bonusCubes,
-    can: canSpend(G, pid, 'special', cost, tax),
-  };
-}
+// Во что обойдётся любое действие (в т.ч. спец.) — считает actionCost, открытая
+// интерфейсу выше. Отдельной specialPlan больше нет: и цена на кнопке, и
+// списание движком идут через одну функцию, поэтому разойтись не могут.
 
-// Куда можно убрать фишку через компьютер: своя локация и соседние через
-// проём, и только те, где эта фишка есть. Пустой список — действие невозможно,
-// и интерфейс обязан это показать, а не предлагать заведомо отклоняемый ход.
+// Куда можно убрать фишку через компьютер: ТОЛЬКО своя локация (решение
+// владельца, отличается от буклета — вариант «соседняя через проём» удалён),
+// и только если эта фишка там есть. Пустой список — действие невозможно, и
+// интерфейс обязан это показать, а не предлагать заведомо отклоняемый ход.
 export function clearHazardTargets(G, pid, hazard) {
   const P = G.players[pid];
   if (!P || P.inSpace || P.dead) return [];
-  
   if (!computerUsable(loc(G, P.pos))) return [];   // действие идёт через компьютер
-  return [P.pos, ...ADJ[P.pos]].filter(l => loc(G, l).hazards[hazard]);
+  return [P.pos].filter(l => loc(G, l).hazards[hazard]);
 }
 
 // Почему компьютер недоступен — словами, для подсказки в интерфейсе.

@@ -144,8 +144,8 @@ export function AdelConsole({ G, numPlayers, canPickType, onPickType, onActivate
                         + (cell.on ? (cell.next ? ' · снимается следующей' : '') : ' (пусто)');
                       return pickable
                         ? <button key={j} className={cls} title={title} onClick={() => onPickType(cell.type)}>
-                          <ChipIcon type={cell.type} /></button>
-                        : <i key={j} className={cls} title={title}><ChipIcon type={cell.type} /></i>;
+                          <ChipIcon type={cell.type} small /></button>
+                        : <i key={j} className={cls} title={title}><ChipIcon type={cell.type} small /></i>;
                     })}
                   </div>
                 </div>
