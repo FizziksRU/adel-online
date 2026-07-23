@@ -772,8 +772,10 @@ export function Board({ G, ctx, moves: rawMoves, playerID, matchData }) {
                   {TERMINALS[l] && <text x="10" y="41" className="term">{TERMINAL_NAMES[TERMINALS[l]].replace('Терминал ', 'T·').replace(' терминал', '')}</text>}
                   {/* Метки состояния — в правом верхнем углу, чтобы не спорить за
                       место с фишками и предметом внизу. */}
-                  {G.alarmTerminals.includes(+l) && <text x="99" y="21" className="alarm">⏰</text>}
-                  {HATCHES[l] && <text x="99" y="41" className="hatch"><title>люк</title>◨</text>}
+                  {/* Выравнивание по правому краю: эмодзи-часы шире буквы и при
+                      левом якоре свешивались за коробку (лок. 3 и 17). */}
+                  {G.alarmTerminals.includes(+l) && <text x="105" y="22" textAnchor="end" className="alarm">⏰</text>}
+                  {HATCHES[l] && <text x="105" y="42" textAnchor="end" className="hatch"><title>люк</title>◨</text>}
                   {/* Предмет в локации: известный — названием, скрытый — значком ▩
                       (серый; сам предмет публичен, скрыта только локация). Сидит в
                       среднем ряду, НАД нижней полосой фишек — они не наезжают. */}
