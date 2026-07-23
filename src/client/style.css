@@ -66,8 +66,10 @@ header { display: flex; gap: 18px; align-items: baseline; flex-wrap: wrap; borde
 .term { fill: var(--dim); font-size: 11px; }
 .alarm, .hatch { font-size: 15px; fill: var(--ink); }
 .itm { fill: #9fb3c8; font-size: 11px; }
-.hz { font-size: 16px; }
-.hz.small { font-size: 13px; }
+/* Скрытый (необысканный) предмет — крупный заметный значок, а не мелкий ▩ в
+   строке имён: сам предмет по правилам публичен, скрыта только локация. */
+.itmhidden { fill: var(--amber); font-size: 22px; font-weight: 700; }
+.hz { font-size: 20px; }
 .door { stroke: #33465c; stroke-width: 5; }
 .door.blocked { stroke: var(--alert); stroke-dasharray: 6 4; cursor: pointer; }
 .pawn { stroke: #0c1117; stroke-width: 2; }
