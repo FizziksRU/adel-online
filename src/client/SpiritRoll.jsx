@@ -103,7 +103,9 @@ export function RollOverlay({ G, roll, spinning }) {
   const { who, against, sign, natural } = rollParts(G, roll);
   return (
     <div className="rolloverlay">
-      <div className={'rollbox ' + (roll.ok ? 'ok' : 'bad')}>
+      {/* Каёмка окрашивается (зелёная/красная) ТОЛЬКО после остановки кубика:
+          пока крутится — нейтральная, иначе исход виден раньше выпавшей грани. */}
+      <div className={'rollbox' + (spinning ? '' : (roll.ok ? ' ok' : ' bad'))}>
         <div className={'die' + (spinning ? ' spin' : '')}>
           {spinning
             ? <span className="reel">{DIE_FACES.map((f, i) => <span key={i}>{f}</span>)}</span>

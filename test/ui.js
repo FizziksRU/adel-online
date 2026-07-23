@@ -995,6 +995,9 @@ const cellsOf = (col, type, cost) =>
   const spinning = overlay({ roll, spinning: true });
   assert(spinning.includes('die spin'), 'пока крутится — кубик в состоянии вращения');
   assert(!spinning.includes('провал'), 'исход до остановки не показывается');
+  // Каёмка красится только после остановки: пока крутится — нейтральная.
+  assert(!spinning.includes('rollbox bad') && !spinning.includes('rollbox ok'),
+    'пока кубик крутится, каёмка не окрашена (цвет — только после выпавшей грани)');
 
   const stopped = overlay({ roll, spinning: false });
   assert(stopped.includes('⚃'), 'кубик остановился на выпавшей грани (4)');
