@@ -768,51 +768,54 @@ export function Board({ G, ctx, moves: rawMoves, playerID, matchData }) {
                 <g key={l} transform={`translate(${x},${y})`} className="locg" onClick={() => clickLoc(+l)}>
                   <rect width={BOX_W} height={BOX_H} rx="12" className="loc"
                     style={{ stroke: SECTOR_TINT[SECTOR_OF[l]] }} />
-                  <text x="10" y="25" className="locnum">{l}</text>
-                  {TERMINALS[l] && <text x="10" y="43" className="term">{TERMINAL_NAMES[TERMINALS[l]].replace('Терминал ', 'T·').replace(' терминал', '')}</text>}
+                  <text x="10" y="24" className="locnum">{l}</text>
+                  {TERMINALS[l] && <text x="10" y="41" className="term">{TERMINAL_NAMES[TERMINALS[l]].replace('Терминал ', 'T·').replace(' терминал', '')}</text>}
                   {/* Метки состояния — в правом верхнем углу, чтобы не спорить за
-                      место с крупными фишками и предметом внизу. */}
-                  {G.alarmTerminals.includes(+l) && <text x="98" y="20" className="alarm">⏰</text>}
-                  {HATCHES[l] && <text x="98" y="41" className="hatch"><title>люк</title>◨</text>}
-                  {/* Предмет в локации: известный — названием, скрытый — крупным
-                      значком ▩ (видно, что тут что-то лежит; локация не утекает). */}
+                      место с фишками и предметом внизу. */}
+                  {G.alarmTerminals.includes(+l) && <text x="99" y="21" className="alarm">⏰</text>}
+                  {HATCHES[l] && <text x="99" y="41" className="hatch"><title>люк</title>◨</text>}
+                  {/* Предмет в локации: известный — названием, скрытый — значком ▩
+                      (серый; сам предмет публичен, скрыта только локация). Сидит в
+                      среднем ряду, НАД нижней полосой фишек — они не наезжают. */}
                   {L.items.length > 0 && (() => {
                     const known = L.items.filter(it => it.faceUp || it.known);
                     const hiddenN = L.items.length - known.length;
                     const names = known.map(it => ITEMS[it.id]?.name ?? '?').join(', ');
                     const long = names.length > 12;
                     return <>
-                      {hiddenN > 0 && <text x="9" y="64" className="itmhidden">
+                      {hiddenN > 0 && <text x="10" y="59" className="itmhidden">
                         ▩{hiddenN > 1 ? `×${hiddenN}` : ''}
                         <title>{`${hiddenN > 1 ? `${hiddenN} неизвестных предмета` : 'неизвестный предмет'} — обыщите локацию`}</title>
                       </text>}
-                      {names && <text x={hiddenN > 0 ? 40 : 10} y="60" className="itm"
+                      {names && <text x={hiddenN > 0 ? 40 : 10} y="57" className="itm"
                         {...(long ? { textLength: BOX_W - (hiddenN > 0 ? 50 : 20), lengthAdjust: 'spacingAndGlyphs' } : {})}>
                         {names}<title>{names}</title>
                       </text>}
                     </>;
                   })()}
-                  {/* Фишки опасностей — крупными ассетами (SVG <image>) полосой у
-                      нижнего края слева; метки без арта (повреждение, ⛔) — эмодзи.
-                      Фишки экипажа рисуются следом и ложатся поверх. */}
+                  {/* Фишки опасностей — полосой у нижнего края слева, С ОТСТУПАМИ от
+                      краёв коробки (видно, что фишка внутри локации). Метки без арта
+                      (повреждение, ⛔) — эмодзи. Пешки экипажа рисуются следом. */}
                   {(() => {
                     const icons = hazIcons(+l);
-                    const S = 30, gap = 1, yTop = BOX_H - S - 1;
+                    const S = 24, gap = 2, yTop = BOX_H - S - 6;
                     return icons.map((ic, i) => {
-                      const cx = 3 + i * (S + gap);
+                      const cx = 6 + i * (S + gap);
                       const src = ic.type ? chipSrc(ic.type) : null;
                       if (src) return (
                         <image key={i} href={src} x={cx} y={yTop} width={S} height={S} className="hzchip">
                           <title>{ic.label || HAZARD_NAMES[ic.type]}</title>
                         </image>);
                       return (
-                        <text key={i} x={cx + 4} y={BOX_H - 8} className="hz">
+                        <text key={i} x={cx + 4} y={BOX_H - 10} className="hz">
                           {ic.emoji || HAZARD_ICON[ic.type]}<title>{ic.label || HAZARD_NAMES[ic.type]}</title>
                         </text>);
                     });
                   })()}
+                  {/* Пешки экипажа — в правом нижнем углу, с отступом от кромок,
+                      чтобы не вылезали за скруглённый угол коробки. */}
                   {here.map(([pid, p], i) =>
-                    <circle key={pid} cx={97 - i * 22} cy="72" r="15" className={'pawn c' + pid}>
+                    <circle key={pid} cx={92 - i * 21} cy="72" r="13" className={'pawn c' + pid}>
                       <title>{CHARACTERS[p.character].name}</title>
                     </circle>)}
                 </g>
